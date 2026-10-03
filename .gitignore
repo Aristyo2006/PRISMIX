@@ -1,0 +1,13 @@
+build*/
+.vs/
+*.user
+*.suo
+Debug/
+Release/
+lib/lvgl/
+*.exe
+*.dll
+*.lib
+*.pdb
+build*.log
+build-errors.txt
