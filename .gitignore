@@ -1,13 +1,52 @@
+# Build directories and outputs
 build*/
+cmake-build-*/
 .vs/
 *.user
 *.suo
 Debug/
 Release/
+CMakeFiles/
+Testing/
 lib/lvgl/
 *.exe
 *.dll
+*.so
+*.dylib
 *.lib
+*.a
 *.pdb
 build*.log
 build-errors.txt
+
+# Verification images & captures
+verify-*.bmp
+verify-*.png
+*.bmp
+
+# Audio test and benchmark files
+*.wav
+benchmark_output.wav
+benchmark_results.*
+test_entry.log
+qa_test_results.txt
+
+# Prompts and agent notes
+*agent*.md
+agents.md
+AGENTS.md
+*prompt*.txt
+last_prompt.txt
+prompt_*.txt
+current_lv2_prompt*.txt
+LVGL_MIXER_MILESTONE_AUDIT.md
+
+# Runtime local scene/config storage
+AudioCore/
+PRISMIX/
+*.cfg
+*.cfg.bak
+
+# OS generated files
+.DS_Store
+Thumbs.db

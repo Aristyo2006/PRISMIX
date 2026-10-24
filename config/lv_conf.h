@@ -46,6 +46,7 @@
 
 #define LV_USE_FLOAT 0
 #define LV_USE_OBJ_ID 0
+#define LV_USE_OBJ_NAME 1
 #define LV_USE_SYSMON 0
 #define LV_USE_PERF_MONITOR 0
 
@@ -55,6 +56,8 @@
 /* Built-in Montserrat kept as last-resort fallback only.
  * AudioCore uses generated IBM Plex Sans Condensed fonts (src/ui/fonts). */
 #define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_UNSCII_8 1
+#define LV_FONT_UNSCII_16 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
 /*====================
