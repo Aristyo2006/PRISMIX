@@ -36,9 +36,10 @@ PRISMIX (`AudioCore`) is a modular digital mixing console and live DSP workstati
 - **Artwork & Responsive Grid**: Asynchronous thumbnail decoding and adaptive card grid reflowing down to compact 800×600 viewports.
 - **One-Click Installation**: Download, validate, unpack, and load LV2 bundles directly into channel FX racks.
 
-### 🌐 Web Control & MODEP-Style Pedalboard Editor
-- **Embedded HTTP & SSE Server**: Non-blocking HTTP JSON API and Server-Sent Events (SSE) broadcast server on port `8888` (configurable via `PRISMIX_WEB_PORT`).
-- **Bidirectional Sync**: Real-time mixer state, metering telemetry, and pedalboard stompbox control synchronized between the LVGL console and connected web browsers.
+### 🌐 Full Web Remote Console & Control API
+- **Complete 7-View Browser Console**: Full industrial web mirror of the hardware console (**Mixer**, **Channel**, **EQ**, **Dynamics**, **FX**, **Routing**, and **System**) with responsive layout, interactive curves, RTA spectrum display, and live LED/VU metering.
+- **Embedded HTTP & SSE Server**: Non-blocking HTTP JSON API (`/api/state`, `/api/telemetry`, `/api/catalog`, `/api/command`) and Server-Sent Events (`/api/events`) broadcast server on port `8888` (configurable via `PRISMIX_WEB_PORT`).
+- **Bidirectional Real-Time Sync**: Instant state, fader, EQ/dynamics, FX rack, PatchStorage, and metering synchronization between the native LVGL console and connected web browsers.
 - **Local-First Binding**: Binds to `127.0.0.1` by default and dynamically rebinds to `0.0.0.0` only when LAN access is explicitly enabled by an authenticated user.
 
 ### 🔒 Security, Network & System Authority
@@ -102,7 +103,7 @@ cmake --build build --config Release
 # Launch the mixer console (or ./build-linux/prismix on Unix)
 ./build-linux/AudioCore
 
-# Open the Web Control & Pedalboard UI in your browser:
+# Open the Web Remote Console in your browser:
 # http://127.0.0.1:8888 (or custom port via PRISMIX_WEB_PORT=8888)
 ```
 
