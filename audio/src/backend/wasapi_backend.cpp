@@ -218,23 +218,6 @@ public:
         return toWrite;
     }
 
-    uint32_t writePlanarChannels(const std::vector<std::vector<float>>& planar,
-                                 uint32_t sourceChannels,
-                                 uint32_t frames) noexcept {
-        const uint32_t toWrite = std::min(frames, availableWrite());
-        if (toWrite == 0 || sourceChannels == 0) return 0;
-        const size_t w = writePos_.load(std::memory_order_relaxed);
-        for (uint32_t i = 0; i < toWrite; ++i) {
-            const size_t idx = (w + i) % capacityFrames_;
-            for (uint32_t ch = 0; ch < channels_; ++ch) {
-                const float value = ch < sourceChannels ? planar[ch][i] : 0.0f;
-                storage_[idx * channels_ + ch] = value;
-            }
-        }
-        writePos_.store((w + toWrite) % capacityFrames_, std::memory_order_release);
-        return toWrite;
-    }
-
     uint32_t readPlanar(AudioBuffer& dest, uint32_t frames) noexcept {
         uint32_t toRead = std::min(frames, availableRead());
         size_t r = readPos_.load(std::memory_order_relaxed);
@@ -297,6 +280,7 @@ public:
             size_t idx = (r + i) % capacityFrames_;
             for (uint32_t ch = 0; ch < channels_; ++ch) {
                 float s = clampSample(storage_[idx * channels_ + ch]);
+                dest[i * channels_ + ch] = static_cast<int32_t>(s * 8388607.0f) << 8;
                 dest[i * channels_ + ch] = static_cast<int32_t>(s * 8388607.0f) * 256;
             }
         }
@@ -335,6 +319,7 @@ public:
             size_t idx = (r + i) % capacityFrames_;
             for (uint32_t ch = 0; ch < channels_; ++ch) {
                 float s = clampSample(storage_[idx * channels_ + ch]);
+                dest[i * channels_ + ch] = static_cast<int32_t>(s * 2147483647.0f);
                 double v = std::floor(static_cast<double>(s) * 2147483647.0 + 0.5);
                 if (v > 2147483647.0) v = 2147483647.0;
                 if (v < -2147483648.0) v = -2147483648.0;
@@ -460,18 +445,18 @@ public:
     static constexpr size_t kCapacity = 2048;
 
     TimingTracker() {
-        for (auto& value : buffer_) value.store(0, std::memory_order_relaxed);
+        buffer_.fill(0);
     }
 
     void record(uint32_t valueUs) noexcept {
         size_t idx = head_.fetch_add(1, std::memory_order_relaxed) % kCapacity;
-        buffer_[idx].store(valueUs, std::memory_order_relaxed);
+        buffer_[idx] = valueUs;
     }
 
     void getPercentiles(uint32_t& p95, uint32_t& p99) const {
         std::vector<uint32_t> copy(kCapacity);
         for (size_t i = 0; i < kCapacity; ++i) {
-            copy[i] = buffer_[i].load(std::memory_order_relaxed);
+            copy[i] = buffer_[i];
         }
         std::sort(copy.begin(), copy.end());
         size_t nonZeroStart = 0;
@@ -492,12 +477,12 @@ public:
     }
 
     void reset() {
-        for (auto& value : buffer_) value.store(0, std::memory_order_relaxed);
+        buffer_.fill(0);
         head_.store(0, std::memory_order_relaxed);
     }
 
 private:
-    std::array<std::atomic<uint32_t>, kCapacity> buffer_;
+    std::array<uint32_t, kCapacity> buffer_;
     std::atomic<size_t> head_{0};
 };
 
@@ -630,72 +615,6 @@ inline void decodeAndMapToStereo(
     }
 }
 
-inline float decodeInterleavedSample(const BYTE* src, uint32_t frame,
-                                     uint32_t channel, uint32_t srcChannels,
-                                     SampleFormat format) noexcept {
-    const size_t sampleIndex = static_cast<size_t>(frame) * srcChannels + channel;
-    switch (format) {
-        case SampleFormat::Float32:
-            return reinterpret_cast<const float*>(src)[sampleIndex];
-        case SampleFormat::Int16:
-            return static_cast<float>(reinterpret_cast<const int16_t*>(src)[sampleIndex]) / 32768.0f;
-        case SampleFormat::Int24In32:
-            return static_cast<float>(reinterpret_cast<const int32_t*>(src)[sampleIndex] >> 8) / 8388608.0f;
-        case SampleFormat::Int24Packed: {
-            const size_t offset = sampleIndex * 3;
-            const int32_t value = static_cast<int32_t>(src[offset]) |
-                (static_cast<int32_t>(src[offset + 1]) << 8) |
-                (static_cast<int32_t>(static_cast<int8_t>(src[offset + 2])) << 16);
-            return static_cast<float>(value) / 8388608.0f;
-        }
-        case SampleFormat::Int32:
-            return static_cast<float>(reinterpret_cast<const int32_t*>(src)[sampleIndex]) / 2147483648.0f;
-        default:
-            return 0.0f;
-    }
-}
-
-inline void decodeToStripStereoPairs(const BYTE* src, uint32_t frames,
-                                    uint32_t srcChannels, SampleFormat format,
-                                    float gain,
-                                    const std::vector<uint32_t>& physicalMap,
-                                    uint32_t engineChannels,
-                                    std::vector<std::vector<float>>& output) noexcept {
-    if (physicalMap.empty()) {
-        for (uint32_t channel = 0; channel < engineChannels; ++channel) {
-            const uint32_t source = std::min(channel, srcChannels ? srcChannels - 1 : 0);
-            float* dest = output[channel].data();
-            for (uint32_t frame = 0; frame < frames; ++frame) {
-                dest[frame] = srcChannels > 0
-                    ? decodeInterleavedSample(src, frame, source, srcChannels, format) * gain : 0.0f;
-            }
-        }
-        return;
-    }
-    if (physicalMap.size() == engineChannels) {
-        for (uint32_t channel = 0; channel < engineChannels; ++channel) {
-            const uint32_t source = physicalMap[channel];
-            float* dest = output[channel].data();
-            for (uint32_t frame = 0; frame < frames; ++frame) {
-                dest[frame] = srcChannels > 0 && source < srcChannels
-                    ? decodeInterleavedSample(src, frame, source, srcChannels, format) * gain : 0.0f;
-            }
-        }
-        return;
-    }
-    for (uint32_t strip = 0; strip * 2 + 1 < engineChannels; ++strip) {
-        const uint32_t source = strip < physicalMap.size() ? physicalMap[strip] : 0;
-        float* left = output[strip * 2].data();
-        float* right = output[strip * 2 + 1].data();
-        for (uint32_t frame = 0; frame < frames; ++frame) {
-            const float sample = srcChannels > 0 && source < srcChannels
-                ? decodeInterleavedSample(src, frame, source, srcChannels, format) * gain : 0.0f;
-            left[frame] = sample;
-            right[frame] = sample;
-        }
-    }
-}
-
 } // anonymous namespace
 
 // ==============================================================================
@@ -709,7 +628,6 @@ struct WasapiBackend::Impl {
     double requestedSampleRate{48000.0};
     uint32_t requestedBlockSize{128};
     uint32_t requestedChannels{2};
-    std::vector<uint32_t> captureChannelMap;
     WasapiShareMode shareMode{WasapiShareMode::Shared};
     WasapiStreamMode streamMode{WasapiStreamMode::PlaybackOnly};
     bool eventDriven{true};
@@ -718,8 +636,6 @@ struct WasapiBackend::Impl {
     double actualSampleRate{48000.0};
     uint32_t actualChannels{2};
     uint32_t actualBufferSizeFrames{0};
-    uint32_t actualCaptureBufferSizeFrames{0};
-    double actualCapturePeriodMs{0.0};
     uint32_t bitDepth{32};
     SampleFormat renderFormatType{SampleFormat::Unsupported};
     SampleFormat captureFormatType{SampleFormat::Unsupported};
@@ -740,13 +656,10 @@ struct WasapiBackend::Impl {
 
     // Streaming SRC and preallocated capture buffers
     SampleRateConverter captureSrc;
-    std::vector<std::vector<float>> capturePreMapChannels;
-    std::vector<std::vector<float>> captureSrcOutChannels;
-    std::vector<std::vector<float>> capturePendingChannels;
-    std::vector<const float*> captureSrcInputPointers;
-    std::vector<float*> captureSrcOutputPointers;
-    uint32_t capturePendingFrames{0};
-    std::atomic<double> captureClockCorrection{0.0};
+    std::vector<float> capturePreMapCh0;
+    std::vector<float> capturePreMapCh1;
+    std::vector<float> captureSrcOutCh0;
+    std::vector<float> captureSrcOutCh1;
 
     // Device Removal / Invalidation state
     std::atomic<bool> deviceInvalidated{false};
@@ -804,15 +717,7 @@ struct WasapiBackend::Impl {
     std::atomic<uint32_t> renderUnderruns{0};
     std::atomic<uint32_t> renderErrors{0};
     std::atomic<uint32_t> captureOverruns{0};
-    std::atomic<uint32_t> captureUnderflows{0};
     std::atomic<uint32_t> captureErrors{0};
-    std::atomic<uint32_t> eventWaitErrors{0};
-    std::atomic<uint32_t> eventWaitTimeouts{0};
-    std::atomic<bool> captureOperational{false};
-    std::atomic<bool> dspOperational{false};
-    std::atomic<bool> renderOperational{false};
-    std::atomic<uint32_t> realtimeErrorCode{0};
-    std::atomic<uint32_t> realtimeErrorOperation{0};
     std::atomic<uint32_t> bufferDiscontinuities{0};
     std::atomic<uint32_t> getBufferFailures{0};
     std::atomic<uint32_t> releaseBufferFailures{0};
@@ -837,11 +742,6 @@ struct WasapiBackend::Impl {
 
     // Capture & Render timing breakdown
     std::atomic<uint64_t> totalFramesCaptured{0};
-    std::atomic<uint64_t> totalCaptureFramesDropped{0};
-    std::atomic<uint64_t> captureTimingCount{0};
-    std::atomic<uint64_t> driftBaselineCaptureFrames{0};
-    std::atomic<uint64_t> driftBaselineRenderFrames{0};
-    std::atomic<bool> driftBaselineReady{false};
     std::atomic<uint64_t> minCaptureTimeUs{UINT64_MAX};
     std::atomic<uint64_t> maxCaptureTimeUs{0};
     std::atomic<uint64_t> totalCaptureTimeUs{0};
@@ -855,7 +755,6 @@ struct WasapiBackend::Impl {
 
     std::atomic<uint64_t> totalWakeupJitterUs{0};
     std::atomic<uint64_t> maxWakeupJitterUs{0};
-    std::atomic<uint64_t> totalEventIntervalUs{0};
 
     std::atomic<uint64_t> countProcessTime{0};
 
@@ -864,8 +763,8 @@ struct WasapiBackend::Impl {
     TimingTracker captureTimingTracker;
     TimingTracker renderTimingTracker;
 
-    std::atomic<bool> mmcssRegistered{false};
-    std::atomic<uint32_t> mmcssErrorCode{0};
+    bool mmcssRegistered{false};
+    uint32_t mmcssErrorCode{0};
 
     Impl() = default;
 
@@ -879,24 +778,11 @@ struct WasapiBackend::Impl {
         totalFramesProcessed.store(0);
         totalFramesSubmitted.store(0);
         totalFramesCaptured.store(0);
-        totalCaptureFramesDropped.store(0);
-        driftBaselineCaptureFrames.store(0, std::memory_order_relaxed);
-        driftBaselineRenderFrames.store(0, std::memory_order_relaxed);
-        driftBaselineReady.store(false, std::memory_order_relaxed);
-        captureTimingCount.store(0);
         frameCountMismatches.store(0);
         renderUnderruns.store(0);
         renderErrors.store(0);
         captureOverruns.store(0);
-        captureUnderflows.store(0);
         captureErrors.store(0);
-        eventWaitErrors.store(0);
-        eventWaitTimeouts.store(0);
-        captureOperational.store(false, std::memory_order_relaxed);
-        dspOperational.store(false, std::memory_order_relaxed);
-        renderOperational.store(false, std::memory_order_relaxed);
-        realtimeErrorCode.store(0, std::memory_order_relaxed);
-        realtimeErrorOperation.store(0, std::memory_order_relaxed);
         bufferDiscontinuities.store(0);
         getBufferFailures.store(0);
         releaseBufferFailures.store(0);
@@ -929,7 +815,6 @@ struct WasapiBackend::Impl {
 
         totalWakeupJitterUs.store(0);
         maxWakeupJitterUs.store(0);
-        totalEventIntervalUs.store(0);
 
         countProcessTime.store(0);
 
@@ -939,18 +824,7 @@ struct WasapiBackend::Impl {
         renderTimingTracker.reset();
     }
 
-    void recordCaptureTiming(uint64_t capUs) {
-        captureTimingCount.fetch_add(1, std::memory_order_relaxed);
-        totalCaptureTimeUs.fetch_add(capUs, std::memory_order_relaxed);
-        uint64_t capMin = minCaptureTimeUs.load(std::memory_order_relaxed);
-        while (capUs < capMin && !minCaptureTimeUs.compare_exchange_weak(capMin, capUs, std::memory_order_relaxed)) {}
-        uint64_t capMax = maxCaptureTimeUs.load(std::memory_order_relaxed);
-        while (capUs > capMax && !maxCaptureTimeUs.compare_exchange_weak(capMax, capUs, std::memory_order_relaxed)) {}
-        captureTimingTracker.record(static_cast<uint32_t>(capUs));
-    }
-
-    void recordTiming(uint64_t cbUs, uint64_t dspUs, uint64_t renUs, uint64_t jitterUs,
-                      uint64_t eventIntervalUs, double blockDeadlineMs) {
+    void recordTiming(uint64_t cbUs, uint64_t dspUs, uint64_t renUs, uint64_t capUs, uint64_t jitterUs, double blockDeadlineMs) {
         countProcessTime.fetch_add(1, std::memory_order_relaxed);
 
         // Callback times
@@ -976,14 +850,21 @@ struct WasapiBackend::Impl {
         while (renUs > rMax && !maxRenderTimeUs.compare_exchange_weak(rMax, renUs, std::memory_order_relaxed)) {}
         maxSubmissionTimeUs.store(rMax, std::memory_order_relaxed);
 
+        // Capture times
+        totalCaptureTimeUs.fetch_add(capUs, std::memory_order_relaxed);
+        uint64_t capMin = minCaptureTimeUs.load(std::memory_order_relaxed);
+        while (capUs < capMin && !minCaptureTimeUs.compare_exchange_weak(capMin, capUs, std::memory_order_relaxed)) {}
+        uint64_t capMax = maxCaptureTimeUs.load(std::memory_order_relaxed);
+        while (capUs > capMax && !maxCaptureTimeUs.compare_exchange_weak(capMax, capUs, std::memory_order_relaxed)) {}
+
         // Jitter
         totalWakeupJitterUs.fetch_add(jitterUs, std::memory_order_relaxed);
-        totalEventIntervalUs.fetch_add(eventIntervalUs, std::memory_order_relaxed);
         uint64_t jMax = maxWakeupJitterUs.load(std::memory_order_relaxed);
         while (jitterUs > jMax && !maxWakeupJitterUs.compare_exchange_weak(jMax, jitterUs, std::memory_order_relaxed)) {}
 
         callbackTimingTracker.record(static_cast<uint32_t>(cbUs));
         dspTimingTracker.record(static_cast<uint32_t>(dspUs));
+        captureTimingTracker.record(static_cast<uint32_t>(capUs));
         renderTimingTracker.record(static_cast<uint32_t>(renUs));
 
         if ((static_cast<double>(cbUs) / 1000.0) > blockDeadlineMs) {
@@ -992,7 +873,7 @@ struct WasapiBackend::Impl {
     }
 
     void cleanup() {
-        if (running.load(std::memory_order_relaxed) || audioThread.joinable()) {
+        if (running.load(std::memory_order_relaxed)) {
             stopStreaming();
         }
 
@@ -1236,6 +1117,7 @@ struct WasapiBackend::Impl {
             nullptr);
 
         if (FAILED(hr)) {
+            lastErrorMessage = "IAudioClient::Initialize (Shared) failed.";
             lastErrorMessage = "IAudioClient::Initialize (Shared) failed: " + hrToString(hr)
                 + " [fmt " + std::to_string(pRenderFormat->nSamplesPerSec) + " Hz, "
                 + std::to_string(pRenderFormat->nChannels) + " ch, "
@@ -1262,16 +1144,7 @@ struct WasapiBackend::Impl {
         }
 
         hr = pRenderClient->GetBufferSize(&actualBufferSizeFrames);
-        if (FAILED(hr)) {
-            lastErrorMessage = "IAudioClient::GetBufferSize (render) failed: " + hrToString(hr);
-            lastErrorCode = static_cast<uint32_t>(hr);
-            return false;
-        }
-        if (actualBufferSizeFrames > kRingBufferCapacity) {
-            lastErrorMessage = "Negotiated render buffer exceeds the preallocated adapter capacity.";
-            lastErrorCode = AUDCLNT_E_BUFFER_SIZE_ERROR;
-            return false;
-        }
+        if (FAILED(hr)) return false;
 
         REFERENCE_TIME latencyHns = 0;
         if (SUCCEEDED(pRenderClient->GetStreamLatency(&latencyHns)) && latencyHns > 0) {
@@ -1409,6 +1282,7 @@ struct WasapiBackend::Impl {
         // Loopback in Exclusive Mode is strictly UNSUPPORTED by Windows Core Audio
         if (sourceType == AudioSourceType::SystemLoopback && shareMode == WasapiShareMode::Exclusive) {
             lastErrorMessage = "WASAPI Loopback capture is UNSUPPORTED in Exclusive Mode (Windows Core Audio architectural restriction). Loopback requires Shared Mode.";
+            lastErrorCode = 0x88890018; // AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED
             lastErrorCode = 0x8889000E; // AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED
             return false;
         }
@@ -1485,18 +1359,6 @@ struct WasapiBackend::Impl {
         }
 
         captureFormatType = determineFormat(pCaptureFormat);
-        if (!captureChannelMap.empty()) {
-            if (captureChannelMap.size() * 2 != requestedChannels) {
-                lastErrorMessage = "Capture channel map does not match the engine's stereo-pair-per-strip layout.";
-                return false;
-            }
-            for (const uint32_t physical : captureChannelMap) {
-                if (physical >= pCaptureFormat->nChannels) {
-                    lastErrorMessage = "A selected strip input is outside the capture endpoint's negotiated channel count.";
-                    return false;
-                }
-            }
-        }
 
         REFERENCE_TIME bufferDuration = static_cast<REFERENCE_TIME>(
             (static_cast<double>(actualBufferSizeFrames) / actualSampleRate) * 10000000.0);
@@ -1517,43 +1379,17 @@ struct WasapiBackend::Impl {
             pCaptureFormat,
             nullptr);
         if (FAILED(hr)) {
-            lastErrorMessage = "IAudioClient::Initialize (capture) failed: " + hrToString(hr)
-                + " [device " + activeCaptureDeviceName + ", requested shared event buffer "
-                + std::to_string(actualBufferSizeFrames) + " render frames; capture format "
-                + std::to_string(pCaptureFormat->nSamplesPerSec) + " Hz / "
-                + std::to_string(pCaptureFormat->nChannels) + " ch / "
-                + std::to_string(pCaptureFormat->wBitsPerSample) + " bit]";
+            lastErrorMessage = "Failed to initialize IAudioClient in capture/loopback mode.";
             lastErrorCode = static_cast<uint32_t>(hr);
             return false;
         }
 
         if (eventDriven) {
             hCaptureEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-            if (!hCaptureEvent) {
-                lastErrorMessage = "CreateEvent(capture) failed for " + activeCaptureDeviceName;
-                lastErrorCode = GetLastError();
-                return false;
-            }
-            hr = pCaptureClient->SetEventHandle(hCaptureEvent);
-            if (FAILED(hr)) {
-                lastErrorMessage = "IAudioClient::SetEventHandle (capture) failed: " + hrToString(hr)
-                    + " [device " + activeCaptureDeviceName + "]";
-                lastErrorCode = static_cast<uint32_t>(hr);
-                return false;
+            if (hCaptureEvent) {
+                pCaptureClient->SetEventHandle(hCaptureEvent);
             }
         }
-
-        hr = pCaptureClient->GetBufferSize(&actualCaptureBufferSizeFrames);
-        if (FAILED(hr)) {
-            lastErrorMessage = "IAudioClient::GetBufferSize (capture) failed: " + hrToString(hr);
-            lastErrorCode = static_cast<uint32_t>(hr);
-            return false;
-        }
-
-        REFERENCE_TIME captureDefaultPeriodHns = 0;
-        REFERENCE_TIME captureMinPeriodHns = 0;
-        hr = pCaptureClient->GetDevicePeriod(&captureDefaultPeriodHns, &captureMinPeriodHns);
-        actualCapturePeriodMs = SUCCEEDED(hr) ? static_cast<double>(captureDefaultPeriodHns) / 10000.0 : 0.0;
 
         hr = pCaptureClient->GetService(
             __uuidof(IAudioCaptureClient),
@@ -1566,25 +1402,10 @@ struct WasapiBackend::Impl {
 
         // Configure streaming SRC if capture sample rate != engine sample rate
         double capRate = static_cast<double>(pCaptureFormat->nSamplesPerSec);
-        captureSrc.enableClockAdaptation(true);
-        captureSrc.configure(capRate, actualSampleRate, requestedChannels, SrcQuality::SincStandard);
-
-        // Size all packet/SRC scratch storage before the audio thread starts. A
-        // capture endpoint can deliver a whole device packet in one wake.
-        const size_t maxPacketFrames = static_cast<size_t>(actualCaptureBufferSizeFrames) * 2 + 64;
-        capturePreMapChannels.assign(requestedChannels, std::vector<float>(maxPacketFrames, 0.0f));
-        const size_t pendingCapacity = static_cast<size_t>(actualCaptureBufferSizeFrames) * 8 + 256;
-        capturePendingChannels.assign(requestedChannels, std::vector<float>(pendingCapacity, 0.0f));
-        capturePendingFrames = 0;
-        captureClockCorrection.store(0.0, std::memory_order_relaxed);
-        const uint32_t maxSrcFrames = SampleRateConverter::calculateOutputFrames(
-            static_cast<uint32_t>(pendingCapacity), capRate, actualSampleRate * 1.01) + 128;
-        captureSrcOutChannels.assign(requestedChannels, std::vector<float>(maxSrcFrames, 0.0f));
-        captureSrcInputPointers.resize(requestedChannels);
-        captureSrcOutputPointers.resize(requestedChannels);
-        for (uint32_t channel = 0; channel < requestedChannels; ++channel) {
-            captureSrcInputPointers[channel] = capturePendingChannels[channel].data();
-            captureSrcOutputPointers[channel] = captureSrcOutChannels[channel].data();
+        if (std::abs(capRate - actualSampleRate) > 1.0) {
+            captureSrc.configure(capRate, actualSampleRate, 2, SrcQuality::SincStandard);
+        } else {
+            captureSrc.configure(actualSampleRate, actualSampleRate, 2, SrcQuality::SincStandard);
         }
 
         return true;
@@ -1615,126 +1436,44 @@ struct WasapiBackend::Impl {
         uint32_t srcCh = pCaptureFormat ? pCaptureFormat->nChannels : actualChannels;
         double capRate = pCaptureFormat ? static_cast<double>(pCaptureFormat->nSamplesPerSec) : actualSampleRate;
 
-        if (capturePreMapChannels.empty() || frames > capturePreMapChannels.front().size() ||
-            (!pCapData && !(flags & AUDCLNT_BUFFERFLAGS_SILENT))) {
-            captureErrors.fetch_add(1, std::memory_order_relaxed);
-            captureOverruns.fetch_add(1, std::memory_order_relaxed);
-            totalCaptureFramesDropped.fetch_add(frames, std::memory_order_relaxed);
+        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+            uint32_t outFrames = (captureSrc.getStatus() == SrcStatus::Active)
+                ? SampleRateConverter::calculateOutputFrames(frames, capRate, actualSampleRate)
+                : frames;
+            captureRingBuffer.writeSilence(outFrames);
+            totalFramesCaptured.fetch_add(frames, std::memory_order_relaxed);
             return;
         }
 
         totalFramesCaptured.fetch_add(frames, std::memory_order_relaxed);
 
-        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-            for (auto& channel : capturePreMapChannels) std::fill_n(channel.data(), frames, 0.0f);
-        } else {
-            decodeToStripStereoPairs(pCapData, frames, srcCh, captureFormatType, gain,
-                                     captureChannelMap, requestedChannels, capturePreMapChannels);
+        if (capturePreMapCh0.size() < frames) {
+            capturePreMapCh0.resize(frames * 2, 0.0f);
+            capturePreMapCh1.resize(frames * 2, 0.0f);
         }
 
-        if (capturePendingChannels.empty()) return;
-        const size_t pendingCapacity = capturePendingChannels.front().size();
-        const uint32_t appendFrames = static_cast<uint32_t>(std::min<size_t>(frames, pendingCapacity - capturePendingFrames));
-        if (appendFrames < frames) {
-            captureOverruns.fetch_add(1, std::memory_order_relaxed);
-            totalCaptureFramesDropped.fetch_add(frames - appendFrames, std::memory_order_relaxed);
-        }
-        if (appendFrames > 0) {
-            for (size_t channel = 0; channel < capturePendingChannels.size(); ++channel) {
-                std::memcpy(capturePendingChannels[channel].data() + capturePendingFrames,
-                            capturePreMapChannels[channel].data(), appendFrames * sizeof(float));
+        decodeAndMapToStereo(pCapData, frames, srcCh, captureFormatType, gain, capturePreMapCh0.data(), capturePreMapCh1.data());
+
+        if (captureSrc.getStatus() == SrcStatus::Active) {
+            uint32_t expectedOut = SampleRateConverter::calculateOutputFrames(frames, capRate, actualSampleRate);
+            if (captureSrcOutCh0.size() < expectedOut + 64) {
+                captureSrcOutCh0.resize((expectedOut + 64) * 2, 0.0f);
+                captureSrcOutCh1.resize((expectedOut + 64) * 2, 0.0f);
             }
-            capturePendingFrames += appendFrames;
-        }
 
-        if (capturePendingFrames == 0) return;
+            const float* inPtrs[2] = { capturePreMapCh0.data(), capturePreMapCh1.data() };
+            float* outPtrs[2] = { captureSrcOutCh0.data(), captureSrcOutCh1.data() };
+            uint32_t consumed = 0;
+            uint32_t produced = captureSrc.processStreaming(inPtrs, frames, consumed, outPtrs, expectedOut);
 
-        const uint32_t occupancy = captureRingBuffer.availableRead();
-        const double targetOccupancy = static_cast<double>(kRingBufferCapacity) * 0.125;
-        const double occupancyError = (targetOccupancy - occupancy) / targetOccupancy;
-        const double targetCorrection = std::clamp(occupancyError * 0.004, -0.01, 0.01);
-        double correction = captureClockCorrection.load(std::memory_order_relaxed);
-        correction += (targetCorrection - correction) * 0.20;
-        captureClockCorrection.store(correction, std::memory_order_relaxed);
-        captureSrc.setStreamingOutputRate(actualSampleRate * (1.0 + correction));
-
-        const uint32_t outputLimit = SampleRateConverter::calculateOutputFrames(
-            capturePendingFrames, capRate, captureSrc.getOutSampleRate()) + 128;
-        if (captureSrcOutChannels.empty() || outputLimit > captureSrcOutChannels.front().size()) {
-            captureErrors.fetch_add(1, std::memory_order_relaxed);
-            captureOverruns.fetch_add(1, std::memory_order_relaxed);
-            totalCaptureFramesDropped.fetch_add(capturePendingFrames, std::memory_order_relaxed);
-            capturePendingFrames = 0;
-            return;
-        }
-
-        uint32_t consumed = 0;
-        const uint32_t produced = captureSrc.processStreaming(captureSrcInputPointers.data(), capturePendingFrames,
-                                                               consumed, captureSrcOutputPointers.data(), outputLimit);
-        if (produced > 0) {
-            const uint32_t written = captureRingBuffer.writePlanarChannels(captureSrcOutChannels,
-                                                                           requestedChannels, produced);
+            uint32_t written = captureRingBuffer.writePlanarStereo(captureSrcOutCh0.data(), captureSrcOutCh1.data(), produced);
             if (written < produced) {
                 captureOverruns.fetch_add(1, std::memory_order_relaxed);
-                totalCaptureFramesDropped.fetch_add(produced - written, std::memory_order_relaxed);
             }
-        }
-        if (consumed > 0) {
-            const uint32_t remaining = capturePendingFrames - consumed;
-            if (remaining > 0) {
-                for (auto& channel : capturePendingChannels) {
-                    std::memmove(channel.data(), channel.data() + consumed, remaining * sizeof(float));
-                }
-            }
-            capturePendingFrames = remaining;
-        }
-    }
-
-    bool drainCapturePackets() {
-        if (!pCaptureService || streamMode == WasapiStreamMode::PlaybackOnly) return true;
-
-        for (;;) {
-            UINT32 packetFrames = 0;
-            HRESULT hr = pCaptureService->GetNextPacketSize(&packetFrames);
-            if (FAILED(hr)) {
-                captureErrors.fetch_add(1, std::memory_order_relaxed);
-                realtimeErrorCode.store(static_cast<uint32_t>(hr), std::memory_order_relaxed);
-                realtimeErrorOperation.store(1, std::memory_order_relaxed);
-                if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                    deviceInvalidated.store(true, std::memory_order_release);
-                    deviceInvalidationCount.fetch_add(1, std::memory_order_relaxed);
-                }
-                return false;
-            }
-            if (packetFrames == 0) return true;
-
-            BYTE* data = nullptr;
-            UINT32 framesRead = 0;
-            DWORD flags = 0;
-            hr = pCaptureService->GetBuffer(&data, &framesRead, &flags, nullptr, nullptr);
-            if (FAILED(hr)) {
-                captureErrors.fetch_add(1, std::memory_order_relaxed);
-                realtimeErrorCode.store(static_cast<uint32_t>(hr), std::memory_order_relaxed);
-                realtimeErrorOperation.store(2, std::memory_order_relaxed);
-                if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                    deviceInvalidated.store(true, std::memory_order_release);
-                    deviceInvalidationCount.fetch_add(1, std::memory_order_relaxed);
-                }
-                return false;
-            }
-
-            const float gain = safeFeedbackGuard ? maxLinearInputGain : 1.0f;
-            processCapturePacket(data, framesRead, flags, gain);
-            hr = pCaptureService->ReleaseBuffer(framesRead);
-            if (FAILED(hr)) {
-                captureErrors.fetch_add(1, std::memory_order_relaxed);
-                realtimeErrorCode.store(static_cast<uint32_t>(hr), std::memory_order_relaxed);
-                realtimeErrorOperation.store(3, std::memory_order_relaxed);
-                if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                    deviceInvalidated.store(true, std::memory_order_release);
-                    deviceInvalidationCount.fetch_add(1, std::memory_order_relaxed);
-                }
-                return false;
+        } else {
+            uint32_t written = captureRingBuffer.writePlanarStereo(capturePreMapCh0.data(), capturePreMapCh1.data(), frames);
+            if (written < frames) {
+                captureOverruns.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
@@ -1760,9 +1499,7 @@ struct WasapiBackend::Impl {
         // Pre-roll: Fill render buffer to initial hardware capacity
         while (renderRingBuffer.availableRead() < actualBufferSizeFrames) {
             if (pCaptureService && streamMode != WasapiStreamMode::PlaybackOnly) {
-                        if (captureRingBuffer.readPlanar(engineBlockIn, blockSz) < blockSz) {
-                            captureUnderflows.fetch_add(1, std::memory_order_relaxed);
-                        }
+                captureRingBuffer.readPlanar(engineBlockIn, blockSz);
             } else {
                 engineBlockIn.clear(blockSz);
             }
@@ -1772,10 +1509,7 @@ struct WasapiBackend::Impl {
             } else {
                 engineBlockOut.clear(blockSz);
             }
-            if (renderRingBuffer.writePlanar(engineBlockOut, blockSz) < blockSz) {
-                renderUnderruns.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
+            renderRingBuffer.writePlanar(engineBlockOut, blockSz);
             totalFramesProcessed.fetch_add(blockSz, std::memory_order_relaxed);
         }
 
@@ -1785,75 +1519,20 @@ struct WasapiBackend::Impl {
             pRenderService->ReleaseBuffer(actualBufferSizeFrames, AUDCLNT_BUFFERFLAGS_SILENT);
         }
 
-        HRESULT startHr = pRenderClient->Start();
-        if (FAILED(startHr)) {
-            realtimeErrorCode.store(static_cast<uint32_t>(startHr), std::memory_order_relaxed);
-            realtimeErrorOperation.store(4, std::memory_order_relaxed);
-            renderErrors.fetch_add(1, std::memory_order_relaxed);
-            running.store(false, std::memory_order_release);
-            return;
-        }
-        renderOperational.store(true, std::memory_order_release);
+        pRenderClient->Start();
         if (pCaptureClient && streamMode != WasapiStreamMode::PlaybackOnly) {
-            startHr = pCaptureClient->Start();
-            if (FAILED(startHr)) {
-                realtimeErrorCode.store(static_cast<uint32_t>(startHr), std::memory_order_relaxed);
-                realtimeErrorOperation.store(5, std::memory_order_relaxed);
-                captureErrors.fetch_add(1, std::memory_order_relaxed);
-                pRenderClient->Stop();
-                renderOperational.store(false, std::memory_order_release);
-                running.store(false, std::memory_order_release);
-                return;
-            }
-            captureOperational.store(true, std::memory_order_release);
+            pCaptureClient->Start();
         }
 
         auto lastWakeTime = std::chrono::steady_clock::now();
-        const double expectedPeriodUs = (actualPeriodicityMs > 0.0 ? actualPeriodicityMs
-            : (static_cast<double>(actualBufferSizeFrames) / actualSampleRate) * 1000.0) * 1000.0;
-        HANDLE waitHandles[2] = {hRenderEvent, hCaptureEvent};
-        const DWORD waitHandleCount = (hCaptureEvent && pCaptureService && streamMode != WasapiStreamMode::PlaybackOnly) ? 2 : 1;
+        const double expectedPeriodUs = (static_cast<double>(activeEngineBlockSize) / actualSampleRate) * 1e6;
 
         while (running.load(std::memory_order_relaxed)) {
-            DWORD waitRes = WaitForMultipleObjects(waitHandleCount, waitHandles, FALSE, 200);
+            DWORD waitRes = WaitForSingleObject(hRenderEvent, 200);
             if (!running.load(std::memory_order_relaxed)) break;
 
-            if (waitRes == WAIT_TIMEOUT) {
-                eventWaitTimeouts.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
-            if (waitRes == WAIT_FAILED) {
-                eventWaitErrors.fetch_add(1, std::memory_order_relaxed);
-                realtimeErrorCode.store(GetLastError(), std::memory_order_relaxed);
-                realtimeErrorOperation.store(6, std::memory_order_relaxed);
-                break;
-            }
-
-            const bool renderWake = waitRes == WAIT_OBJECT_0;
-            const bool captureWake = waitHandleCount == 2 && waitRes == WAIT_OBJECT_0 + 1;
-            if (waitRes != WAIT_OBJECT_0 && !captureWake) {
-                eventWaitErrors.fetch_add(1, std::memory_order_relaxed);
-                realtimeErrorCode.store(waitRes, std::memory_order_relaxed);
-                realtimeErrorOperation.store(6, std::memory_order_relaxed);
-                break;
-            }
-
-            if (captureWake || renderWake) {
-                const auto tWake = std::chrono::steady_clock::now();
-                auto tCapStart = std::chrono::steady_clock::now();
-                const bool captureOk = drainCapturePackets();
-                if (pCaptureService && streamMode != WasapiStreamMode::PlaybackOnly) {
-                    captureOperational.store(captureOk, std::memory_order_release);
-                }
-                if (!captureOk && deviceInvalidated.load(std::memory_order_acquire)) break;
-                auto tCapEnd = std::chrono::steady_clock::now();
-                const uint64_t capDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(tCapEnd - tCapStart).count();
-                recordCaptureTiming(capDurationUs);
-                if (captureWake) captureOperational.store(true, std::memory_order_relaxed);
-                if (!renderWake) {
-                    continue;
-                }
-
+            if (waitRes == WAIT_OBJECT_0) {
+                auto tWake = std::chrono::steady_clock::now();
                 currentProcessorId.store(static_cast<int32_t>(GetCurrentProcessorNumber()), std::memory_order_relaxed);
                 totalCallbacks.fetch_add(1, std::memory_order_relaxed);
 
@@ -1869,27 +1548,15 @@ struct WasapiBackend::Impl {
                     if (hrPad == AUDCLNT_E_DEVICE_INVALIDATED) {
                         deviceInvalidated.store(true, std::memory_order_release);
                         deviceInvalidationCount.fetch_add(1, std::memory_order_relaxed);
-                        realtimeErrorCode.store(static_cast<uint32_t>(hrPad), std::memory_order_relaxed);
-                        realtimeErrorOperation.store(7, std::memory_order_relaxed);
+                        lastErrorMessage = "Audio device was unplugged or invalidated by system (AUDCLNT_E_DEVICE_INVALIDATED).";
                         break;
                     }
                     renderErrors.fetch_add(1, std::memory_order_relaxed);
-                    renderOperational.store(false, std::memory_order_release);
-                    realtimeErrorCode.store(static_cast<uint32_t>(hrPad), std::memory_order_relaxed);
-                    realtimeErrorOperation.store(8, std::memory_order_relaxed);
-                    continue;
-                }
-
-                if (padding > actualBufferSizeFrames) {
-                    renderErrors.fetch_add(1, std::memory_order_relaxed);
-                    realtimeErrorCode.store(static_cast<uint32_t>(E_UNEXPECTED), std::memory_order_relaxed);
-                    realtimeErrorOperation.store(8, std::memory_order_relaxed);
                     continue;
                 }
 
                 UINT32 framesNeeded = actualBufferSizeFrames - padding;
                 if (framesNeeded == 0) continue;
-                const double deadlineMs = (static_cast<double>(padding) / actualSampleRate) * 1000.0;
                 totalFramesRequested.fetch_add(framesNeeded, std::memory_order_relaxed);
 
                 BYTE* pRenderData = nullptr;
@@ -1898,16 +1565,32 @@ struct WasapiBackend::Impl {
                     if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
                         deviceInvalidated.store(true, std::memory_order_release);
                         deviceInvalidationCount.fetch_add(1, std::memory_order_relaxed);
-                        realtimeErrorCode.store(static_cast<uint32_t>(hr), std::memory_order_relaxed);
-                        realtimeErrorOperation.store(9, std::memory_order_relaxed);
+                        lastErrorMessage = "Render device invalidated during GetBuffer.";
                         break;
                     }
                     getBufferFailures.fetch_add(1, std::memory_order_relaxed);
-                    renderOperational.store(false, std::memory_order_release);
-                    realtimeErrorCode.store(static_cast<uint32_t>(hr), std::memory_order_relaxed);
-                    realtimeErrorOperation.store(10, std::memory_order_relaxed);
                     continue;
                 }
+
+                // Step 1: Read all available capture packets
+                auto tCapStart = std::chrono::steady_clock::now();
+                if (pCaptureService && streamMode != WasapiStreamMode::PlaybackOnly) {
+                    UINT32 packetFrames = 0;
+                    while (SUCCEEDED(pCaptureService->GetNextPacketSize(&packetFrames)) && packetFrames > 0) {
+                        BYTE* pCapData = nullptr;
+                        UINT32 framesRead = 0;
+                        DWORD flags = 0;
+                        if (SUCCEEDED(pCaptureService->GetBuffer(&pCapData, &framesRead, &flags, nullptr, nullptr)) && pCapData) {
+                            float gain = safeFeedbackGuard ? maxLinearInputGain : 1.0f;
+                            processCapturePacket(pCapData, framesRead, flags, gain);
+                            pCaptureService->ReleaseBuffer(framesRead);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                auto tCapEnd = std::chrono::steady_clock::now();
+                uint64_t capDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(tCapEnd - tCapStart).count();
 
                 // Step 2: Adapter Loop - Run Engine in EXACT activeEngineBlockSize chunks
                 auto tDspStart = std::chrono::steady_clock::now();
@@ -1926,12 +1609,8 @@ struct WasapiBackend::Impl {
                         engineBlockOut.clear(blockSz);
                     }
 
-                    if (renderRingBuffer.writePlanar(engineBlockOut, blockSz) < blockSz) {
-                        renderUnderruns.fetch_add(1, std::memory_order_relaxed);
-                        break;
-                    }
+                    renderRingBuffer.writePlanar(engineBlockOut, blockSz);
                     totalFramesProcessed.fetch_add(blockSz, std::memory_order_relaxed);
-                    dspOperational.store(true, std::memory_order_relaxed);
                 }
 
                 auto tDspEnd = std::chrono::steady_clock::now();
@@ -1963,12 +1642,8 @@ struct WasapiBackend::Impl {
                 hr = pRenderService->ReleaseBuffer(framesNeeded, 0);
                 if (FAILED(hr)) {
                     releaseBufferFailures.fetch_add(1, std::memory_order_relaxed);
-                    renderOperational.store(false, std::memory_order_release);
-                    realtimeErrorCode.store(static_cast<uint32_t>(hr), std::memory_order_relaxed);
-                    realtimeErrorOperation.store(11, std::memory_order_relaxed);
                 } else {
                     totalFramesSubmitted.fetch_add(framesNeeded, std::memory_order_relaxed);
-                    renderOperational.store(true, std::memory_order_release);
                 }
 
                 if (framesPopped != framesNeeded) {
@@ -1979,14 +1654,8 @@ struct WasapiBackend::Impl {
                 uint64_t renDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(tEnd - tRenStart).count();
                 uint64_t totalCallbackUs = std::chrono::duration_cast<std::chrono::microseconds>(tEnd - tWake).count();
 
-                recordTiming(totalCallbackUs, dspDurationUs, renDurationUs, jitterUs, actualIntervalUs, deadlineMs);
-                if (!driftBaselineReady.load(std::memory_order_relaxed) &&
-                    totalFramesCaptured.load(std::memory_order_relaxed) > 0 &&
-                    totalFramesSubmitted.load(std::memory_order_relaxed) > 0) {
-                    driftBaselineCaptureFrames.store(totalFramesCaptured.load(std::memory_order_relaxed), std::memory_order_relaxed);
-                    driftBaselineRenderFrames.store(totalFramesSubmitted.load(std::memory_order_relaxed), std::memory_order_relaxed);
-                    driftBaselineReady.store(true, std::memory_order_release);
-                }
+                double deadlineMs = (static_cast<double>(framesNeeded) / actualSampleRate) * 1000.0;
+                recordTiming(totalCallbackUs, dspDurationUs, renDurationUs, capDurationUs, jitterUs, deadlineMs);
             }
         }
 
@@ -1994,10 +1663,6 @@ struct WasapiBackend::Impl {
         if (pCaptureClient) {
             pCaptureClient->Stop();
         }
-        captureOperational.store(false, std::memory_order_release);
-        dspOperational.store(false, std::memory_order_release);
-        renderOperational.store(false, std::memory_order_release);
-        running.store(false, std::memory_order_release);
 
         if (hAvrt) {
             AvRevertMmThreadCharacteristics(hAvrt);
@@ -2009,9 +1674,6 @@ struct WasapiBackend::Impl {
     bool startStreaming() {
         if (!initialized.load(std::memory_order_relaxed)) return false;
         if (running.load(std::memory_order_relaxed)) return true;
-        if (audioThread.joinable()) {
-            audioThread.join();
-        }
 
         if (engine) {
             if (engine->getBlockSize() > 0) {
@@ -2020,12 +1682,12 @@ struct WasapiBackend::Impl {
             if (std::abs(engine->getSampleRate() - actualSampleRate) > 1.0) {
                 sampleRateMismatches.fetch_add(1, std::memory_order_relaxed);
             }
-            if (engine->getChannelCount() != requestedChannels) {
+            if (engine->getChannelCount() != actualChannels) {
                 channelMismatches.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
-        engineBlockIn.resize(requestedChannels, activeEngineBlockSize);
+        engineBlockIn.resize(actualChannels, activeEngineBlockSize);
         engineBlockOut.resize(actualChannels, activeEngineBlockSize);
 
         renderRingBuffer.clear();
@@ -2055,17 +1717,14 @@ struct WasapiBackend::Impl {
     }
 
     void stopStreaming() {
-        running.store(false, std::memory_order_release);
-        if (hRenderEvent) SetEvent(hRenderEvent);
-        if (hCaptureEvent) SetEvent(hCaptureEvent);
-        if (audioThread.joinable()) {
-            audioThread.join();
-        }
-        if (hAudioThreadNative) {
-            CloseHandle(hAudioThreadNative);
-            hAudioThreadNative = nullptr;
-        }
-        if (!running.load(std::memory_order_relaxed)) {
+        if (running.load(std::memory_order_relaxed)) {
+            running.store(false, std::memory_order_release);
+            if (hRenderEvent) {
+                SetEvent(hRenderEvent);
+            }
+            if (audioThread.joinable()) {
+                audioThread.join();
+            }
             currentProcessorId.store(-1, std::memory_order_relaxed);
         }
     }
@@ -2091,8 +1750,6 @@ bool WasapiBackend::initialize(
     uint32_t channels)
 {
     impl_->cleanup();
-    impl_->lastErrorMessage.clear();
-    impl_->lastErrorCode = 0;
 
     impl_->requestedSampleRate = (sampleRate > 0.0) ? sampleRate : 48000.0;
     impl_->requestedBlockSize = (blockSize > 0) ? blockSize : 128;
@@ -2123,11 +1780,17 @@ bool WasapiBackend::initialize(
     }
 
     impl_->renderRingBuffer.configure(impl_->actualChannels, Impl::kRingBufferCapacity);
-    impl_->captureRingBuffer.configure(impl_->requestedChannels, Impl::kRingBufferCapacity);
+    impl_->captureRingBuffer.configure(impl_->actualChannels, Impl::kRingBufferCapacity);
 
     impl_->activeEngineBlockSize = impl_->requestedBlockSize;
-    impl_->engineBlockIn.resize(impl_->requestedChannels, impl_->activeEngineBlockSize);
+    impl_->engineBlockIn.resize(impl_->actualChannels, impl_->activeEngineBlockSize);
     impl_->engineBlockOut.resize(impl_->actualChannels, impl_->activeEngineBlockSize);
+
+    // Preallocate capture adapter & SRC planar scratch buffers
+    impl_->capturePreMapCh0.assign(8192, 0.0f);
+    impl_->capturePreMapCh1.assign(8192, 0.0f);
+    impl_->captureSrcOutCh0.assign(8192, 0.0f);
+    impl_->captureSrcOutCh1.assign(8192, 0.0f);
 
     impl_->initialized.store(true, std::memory_order_release);
     return true;
@@ -2289,13 +1952,6 @@ bool WasapiBackend::setCaptureDevice(const std::string& deviceId) {
     return true;
 }
 
-bool WasapiBackend::setCaptureChannelMap(const std::vector<uint32_t>& physicalChannels) {
-    if (impl_->running.load(std::memory_order_relaxed)) return false;
-    if (physicalChannels.empty()) return false;
-    impl_->captureChannelMap = physicalChannels;
-    return true;
-}
-
 void WasapiBackend::setStreamMode(WasapiStreamMode mode) {
     if (impl_->running.load(std::memory_order_relaxed)) return;
     impl_->streamMode = mode;
@@ -2426,25 +2082,19 @@ uint32_t WasapiBackend::getCaptureChannels() const {
 }
 
 uint32_t WasapiBackend::getCaptureBufferSizeFrames() const {
-    return impl_->actualCaptureBufferSizeFrames;
+    return impl_->actualBufferSizeFrames;
 }
 
 double WasapiBackend::getClockDriftPpm() const {
     if (impl_->sourceType == AudioSourceType::FilePlayback || !impl_->pCaptureService) {
         return 0.0;
     }
-    if (!impl_->driftBaselineReady.load(std::memory_order_acquire)) return 0.0;
     uint64_t capFrames = impl_->totalFramesCaptured.load(std::memory_order_relaxed);
     uint64_t renFrames = impl_->totalFramesSubmitted.load(std::memory_order_relaxed);
-    const uint64_t capBase = impl_->driftBaselineCaptureFrames.load(std::memory_order_relaxed);
-    const uint64_t renBase = impl_->driftBaselineRenderFrames.load(std::memory_order_relaxed);
-    if (capFrames < capBase || renFrames < renBase) return 0.0;
-    capFrames -= capBase;
-    renFrames -= renBase;
+    if (renFrames < 4800) return 0.0;
 
     double capRate = (impl_->pCaptureFormat) ? static_cast<double>(impl_->pCaptureFormat->nSamplesPerSec) : impl_->actualSampleRate;
     double renRate = impl_->actualSampleRate;
-    if (renFrames < static_cast<uint64_t>(renRate * 30.0)) return 0.0;
 
     double expectedCapFrames = static_cast<double>(renFrames) * (capRate / renRate);
     if (expectedCapFrames <= 0.0) return 0.0;
@@ -2511,14 +2161,6 @@ std::string WasapiBackend::getActiveCaptureDeviceName() const {
     return impl_->activeCaptureDeviceName;
 }
 
-std::string WasapiBackend::getActivePlaybackDeviceId() const {
-    return impl_->selectedPlaybackDeviceId;
-}
-
-std::string WasapiBackend::getActiveCaptureDeviceId() const {
-    return impl_->selectedCaptureDeviceId;
-}
-
 uint32_t WasapiBackend::getActualBufferSizeFrames() const {
     return impl_->actualBufferSizeFrames;
 }
@@ -2529,23 +2171,6 @@ uint32_t WasapiBackend::getBitDepth() const {
 
 std::string WasapiBackend::getFormatDescription() const {
     switch (impl_->renderFormatType) {
-        case SampleFormat::Float32:
-            return "32-bit IEEE Float (Interleaved)";
-        case SampleFormat::Int16:
-            return "16-bit PCM Integer (Interleaved)";
-        case SampleFormat::Int24In32:
-            return "24-bit PCM in 32-bit container (Interleaved)";
-        case SampleFormat::Int24Packed:
-            return "24-bit PCM packed (Interleaved)";
-        case SampleFormat::Int32:
-            return "32-bit PCM Integer (Interleaved)";
-        default:
-            return "Unknown / Unsupported";
-    }
-}
-
-std::string WasapiBackend::getCaptureFormatDescription() const {
-    switch (impl_->captureFormatType) {
         case SampleFormat::Float32:
             return "32-bit IEEE Float (Interleaved)";
         case SampleFormat::Int16:
@@ -2624,10 +2249,7 @@ WasapiBackend::Diagnostics WasapiBackend::getDiagnostics() const {
     d.renderUnderruns = impl_->renderUnderruns.load(std::memory_order_relaxed);
     d.renderErrors = impl_->renderErrors.load(std::memory_order_relaxed);
     d.captureOverruns = impl_->captureOverruns.load(std::memory_order_relaxed);
-    d.captureUnderflows = impl_->captureUnderflows.load(std::memory_order_relaxed);
     d.captureErrors = impl_->captureErrors.load(std::memory_order_relaxed);
-    d.eventWaitErrors = impl_->eventWaitErrors.load(std::memory_order_relaxed);
-    d.eventWaitTimeouts = impl_->eventWaitTimeouts.load(std::memory_order_relaxed);
     d.bufferDiscontinuities = impl_->bufferDiscontinuities.load(std::memory_order_relaxed);
     d.getBufferFailures = impl_->getBufferFailures.load(std::memory_order_relaxed);
     d.releaseBufferFailures = impl_->releaseBufferFailures.load(std::memory_order_relaxed);
@@ -2653,11 +2275,9 @@ WasapiBackend::Diagnostics WasapiBackend::getDiagnostics() const {
 
     // Capture Timing
     d.totalFramesCaptured = impl_->totalFramesCaptured.load(std::memory_order_relaxed);
-    d.totalCaptureFramesDropped = impl_->totalCaptureFramesDropped.load(std::memory_order_relaxed);
     d.minCaptureTimeUs = impl_->minCaptureTimeUs.load(std::memory_order_relaxed);
     d.maxCaptureTimeUs = impl_->maxCaptureTimeUs.load(std::memory_order_relaxed);
-    const uint64_t captureCnt = impl_->captureTimingCount.load(std::memory_order_relaxed);
-    d.avgCaptureTimeUs = (captureCnt > 0) ? (impl_->totalCaptureTimeUs.load(std::memory_order_relaxed) / captureCnt) : 0;
+    d.avgCaptureTimeUs = (cnt > 0) ? (impl_->totalCaptureTimeUs.load(std::memory_order_relaxed) / cnt) : 0;
     impl_->captureTimingTracker.getPercentiles(reinterpret_cast<uint32_t&>(d.p95CaptureTimeUs),
                                               reinterpret_cast<uint32_t&>(d.p99CaptureTimeUs));
 
@@ -2682,29 +2302,11 @@ WasapiBackend::Diagnostics WasapiBackend::getDiagnostics() const {
     d.avgWakeupJitterUs = (cnt > 0) ? (impl_->totalWakeupJitterUs.load(std::memory_order_relaxed) / cnt) : 0;
     d.maxWakeupJitterUs = impl_->maxWakeupJitterUs.load(std::memory_order_relaxed);
 
-    d.requestedBufferFrames = impl_->requestedBlockSize;
-    d.actualRenderBufferFrames = impl_->actualBufferSizeFrames;
-    d.actualCaptureBufferFrames = impl_->actualCaptureBufferSizeFrames;
-    d.renderChannels = impl_->actualChannels;
-    d.captureChannels = impl_->pCaptureFormat ? impl_->pCaptureFormat->nChannels : 0;
-    d.renderBitDepth = impl_->bitDepth;
-    d.captureBitDepth = impl_->pCaptureFormat ? impl_->pCaptureFormat->wBitsPerSample : 0;
-    d.requestedSampleRate = impl_->requestedSampleRate;
-    d.actualRenderSampleRate = impl_->actualSampleRate;
-    d.actualCaptureSampleRate = impl_->pCaptureFormat ? impl_->pCaptureFormat->nSamplesPerSec : 0.0;
-    d.endpointDefaultPeriodMs = impl_->actualPeriodicityMs;
-    d.actualCapturePeriodMs = impl_->actualCapturePeriodMs;
-    d.captureClockCorrectionPpm = impl_->captureClockCorrection.load(std::memory_order_relaxed) * 1e6;
-    d.measuredEventPeriodMs = cnt > 0
-        ? static_cast<double>(impl_->totalEventIntervalUs.load(std::memory_order_relaxed) / cnt) / 1000.0 : 0.0;
-    d.actualRenderPeriodMs = d.measuredEventPeriodMs > 0.0 ? d.measuredEventPeriodMs : impl_->actualPeriodicityMs;
-    d.periodDurationMs = d.actualRenderPeriodMs;
-    d.engineBlockDurationMs = (impl_->actualSampleRate > 0.0 && impl_->activeEngineBlockSize > 0)
+    d.periodDurationMs = (impl_->actualSampleRate > 0.0 && impl_->activeEngineBlockSize > 0)
         ? ((static_cast<double>(impl_->activeEngineBlockSize) / impl_->actualSampleRate) * 1000.0) : 0.0;
-    d.renderBufferDurationMs = (impl_->actualSampleRate > 0.0 && impl_->actualBufferSizeFrames > 0)
-        ? ((static_cast<double>(impl_->actualBufferSizeFrames) / impl_->actualSampleRate) * 1000.0) : 0.0;
 
-    d.blockDeadlineMs = impl_->actualPeriodicityMs;
+    d.blockDeadlineMs = (impl_->actualSampleRate > 0.0 && impl_->actualBufferSizeFrames > 0)
+        ? ((static_cast<double>(impl_->actualBufferSizeFrames) / impl_->actualSampleRate) * 1000.0) : 0.0;
 
     double periodUs = d.periodDurationMs * 1000.0;
     if (periodUs > 0.0) {
@@ -2713,57 +2315,17 @@ WasapiBackend::Diagnostics WasapiBackend::getDiagnostics() const {
     }
 
     d.clockDriftPpm = getClockDriftPpm();
-    if (impl_->driftBaselineReady.load(std::memory_order_acquire)) {
-        const uint64_t renderFrames = impl_->totalFramesSubmitted.load(std::memory_order_relaxed);
-        const uint64_t baselineFrames = impl_->driftBaselineRenderFrames.load(std::memory_order_relaxed);
-        d.clockDriftMeasurementValid = renderFrames >= baselineFrames &&
-            (renderFrames - baselineFrames) >= static_cast<uint64_t>(impl_->actualSampleRate * 30.0);
-    }
     d.bufferOccupancyPercent = getBufferOccupancyPercent();
     d.nanCount = impl_->nanCount.load(std::memory_order_relaxed);
     d.infCount = impl_->infCount.load(std::memory_order_relaxed);
     d.loopbackActive = (impl_->sourceType == AudioSourceType::SystemLoopback && impl_->running.load(std::memory_order_relaxed));
     d.feedbackRiskDetected = checkFeedbackRisk();
-    d.captureOperational = impl_->captureOperational.load(std::memory_order_acquire);
-    d.dspOperational = impl_->dspOperational.load(std::memory_order_acquire);
-    d.renderOperational = impl_->renderOperational.load(std::memory_order_acquire);
 
-    d.mmcssRegistered = impl_->mmcssRegistered.load(std::memory_order_relaxed);
-    d.mmcssErrorCode = impl_->mmcssErrorCode.load(std::memory_order_relaxed);
-    d.lastHresult = impl_->realtimeErrorCode.load(std::memory_order_relaxed);
-    if (d.lastHresult == 0) d.lastHresult = impl_->lastErrorCode;
+    d.mmcssRegistered = impl_->mmcssRegistered;
+    d.mmcssErrorCode = impl_->mmcssErrorCode;
+    d.lastHresult = impl_->lastErrorCode;
     d.lastErrorMessage = impl_->lastErrorMessage;
-    const uint32_t op = impl_->realtimeErrorOperation.load(std::memory_order_relaxed);
-    if (op != 0 && d.lastErrorMessage.empty()) {
-        static const char* operations[] = {"", "IAudioCaptureClient::GetNextPacketSize", "IAudioCaptureClient::GetBuffer",
-            "IAudioCaptureClient::ReleaseBuffer", "IAudioClient::Start(render)", "IAudioClient::Start(capture)",
-            "WaitForMultipleObjects", "IAudioClient::GetCurrentPadding(device invalidated)",
-            "IAudioClient::GetCurrentPadding", "IAudioRenderClient::GetBuffer(device invalidated)",
-            "IAudioRenderClient::GetBuffer", "IAudioRenderClient::ReleaseBuffer"};
-        std::ostringstream error;
-        error << operations[std::min<size_t>(op, std::size(operations) - 1)] << " failed: "
-              << hrToString(static_cast<HRESULT>(d.lastHresult))
-              << " [render device " << impl_->activePlaybackDeviceName
-              << ", capture device " << impl_->activeCaptureDeviceName
-              << ", requested " << impl_->requestedSampleRate << " Hz / "
-              << impl_->requestedBlockSize << " frames; actual render " << impl_->actualSampleRate
-              << " Hz / " << impl_->actualBufferSizeFrames << " frames]";
-        d.lastErrorMessage = error.str();
-    }
     return d;
-}
-
-WasapiBackend::RealtimeMetrics WasapiBackend::getRealtimeMetrics() const noexcept {
-    RealtimeMetrics metrics;
-    const uint64_t callbacks = impl_->totalCallbacks.load(std::memory_order_relaxed);
-    metrics.averageDspTimeUs = callbacks > 0
-        ? impl_->totalDspTimeUs.load(std::memory_order_relaxed) / callbacks : 0;
-    metrics.renderUnderruns = impl_->renderUnderruns.load(std::memory_order_relaxed);
-    metrics.deadlineMisses = impl_->deadlineMisses.load(std::memory_order_relaxed);
-    metrics.captureOperational = impl_->captureOperational.load(std::memory_order_acquire);
-    metrics.dspOperational = impl_->dspOperational.load(std::memory_order_acquire);
-    metrics.renderOperational = impl_->renderOperational.load(std::memory_order_acquire);
-    return metrics;
 }
 
 void WasapiBackend::resetDiagnostics() {
@@ -2773,7 +2335,7 @@ void WasapiBackend::resetDiagnostics() {
 std::vector<WasapiBackend::BenchmarkResult> WasapiBackend::runBenchmarkMatrix(uint32_t testBlocksPerConfig) {
     std::vector<BenchmarkResult> results;
     std::vector<double> rates = {44100.0, 48000.0, 96000.0};
-    std::vector<uint32_t> buffers = {128, 256, 512, 1024};
+    std::vector<uint32_t> buffers = {64, 128, 256, 512};
 
     // Save active configuration
     bool wasRunning = isRunning();
@@ -2799,17 +2361,7 @@ std::vector<WasapiBackend::BenchmarkResult> WasapiBackend::runBenchmarkMatrix(ui
                 continue;
             }
 
-            res.actualSampleRate = getSampleRate();
             res.actualBuffer = getActualBufferSizeFrames();
-            if (std::abs(getSampleRate() - r) > 0.5) {
-                res.status = "UNSUPPORTED";
-                std::ostringstream note;
-                note << "Requested " << r << " Hz was not negotiated; shared endpoint mix is "
-                     << getSampleRate() << " Hz (actual buffer " << res.actualBuffer << " frames)";
-                res.notes = note.str();
-                results.push_back(res);
-                continue;
-            }
 
             if (!start()) {
                 res.status = "FAIL";

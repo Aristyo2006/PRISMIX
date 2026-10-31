@@ -1386,6 +1386,7 @@ void startLivePlayback() {
     } else {
         g_app.backend->setStreamMode(audiocore::WasapiStreamMode::Duplex);
     }
+    g_app.backend->setSafeFeedbackGuard(true, 0.05f);
     {
         // Explicit feedback guard: none for file playback (no capture path);
         // -12 dB for a physical input; -26 dB for loopback (own output can re-enter).
@@ -2859,7 +2860,6 @@ struct DeviceTestUiState {
     HWND hTxtTelemetryDsp{nullptr};
     HWND hTxtTelemetryUtil{nullptr};
     HWND hTxtTelemetryXrun{nullptr};
-    HWND hTxtOperationalStates{nullptr};
     HWND hTxtClockDrift{nullptr};
 
     HWND hBtnMatrix{nullptr};
@@ -2984,9 +2984,7 @@ static void startDeviceTestStream() {
     s_devUi.sigGen = std::make_shared<audiocore::SignalGeneratorNode>(actualRate);
     s_devUi.sigGen->setSignalType(wf);
     s_devUi.sigGen->setLevelDb(lvlDb);
-    // The signal generator is only a playback source. On live capture paths it
-    // must pass the captured samples through to the DSP graph.
-    s_devUi.sigGen->setEnabled(streamMode == audiocore::WasapiStreamMode::PlaybackOnly);
+    s_devUi.sigGen->setEnabled(true);
     graph.addNode(s_devUi.sigGen);
 
     s_devUi.routeThroughDsp = (SendMessageA(s_devUi.hChkRouteDsp, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -3038,17 +3036,13 @@ static void startDeviceTestStream() {
     std::ostringstream neg;
     neg << "Active Stream: " << s_devUi.backend->getActivePlaybackDeviceName() << "\r\n"
         << "Share Mode: " << (shareMode == audiocore::WasapiShareMode::Exclusive ? "Exclusive" : "Shared")
-        << " | Requested Rate: " << rate << " Hz | Engine/Render: " << actualRate << " Hz / " << actualChannels << " ch\r\n"
+        << " | Rate: " << actualRate << " Hz | Ch: " << actualChannels << "\r\n"
         << "Buffer Size: " << s_devUi.backend->getBufferSizeFrames() << " frames ("
         << std::fixed << std::setprecision(2) << s_devUi.backend->getActualPeriodicityMs() << " ms period)\r\n"
-        << "Requested Block: " << block << " frames | Input: " << s_devUi.backend->getActiveCaptureDeviceName()
-        << " | Capture: " << s_devUi.backend->getCaptureSampleRate() << " Hz / "
-        << s_devUi.backend->getCaptureChannels() << " ch / " << s_devUi.backend->getCaptureBufferSizeFrames() << " frames / "
-        << s_devUi.backend->getCaptureFormatDescription() << "\r\n"
         << "Nominal Buffer Duration: " << s_devUi.backend->getNominalBufferDurationMs() << " ms\r\n"
         << "Reported WASAPI Latency: " << s_devUi.backend->getReportedLatencyMs() << " ms\r\n"
         << "Measured Round-Trip Latency: NOT IMPLEMENTED (Requires physical loopback cable)\r\n"
-        << "Event-Driven Audio Engine: ACTIVE (render and capture event handles)";
+        << "Event-Driven Audio Engine: ACTIVE (Continuous Event Wait)";
     SetWindowTextA(s_devUi.hTxtNegotiated, neg.str().c_str());
 }
 
@@ -3341,14 +3335,11 @@ LRESULT CALLBACK DeviceTestWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             s_devUi.hTxtTelemetryXrun = CreateWindowA("STATIC", "XRUNs: Underruns: 0 | Overruns: 0 | Deadlines: 0 | Discont: 0 | Inval: 0",
                                                       WS_CHILD | WS_VISIBLE, 476, 310, 450, 18, hwnd, (HMENU)(INT_PTR)IDC_DEVTEST_TXT_TELEM_XRUN, nullptr, nullptr);
 
-            s_devUi.hTxtOperationalStates = CreateWindowA("STATIC", "CAPTURE: STOPPED | DSP: STOPPED | RENDER: STOPPED",
-                                                          WS_CHILD | WS_VISIBLE, 476, 334, 450, 18, hwnd, nullptr, nullptr, nullptr);
-
             CreateWindowA("STATIC", "MMCSS Thread Priority: Pro Audio (AVRT Registered)",
-                          WS_CHILD | WS_VISIBLE, 476, 354, 450, 18, hwnd, nullptr, nullptr, nullptr);
+                          WS_CHILD | WS_VISIBLE, 476, 334, 450, 18, hwnd, nullptr, nullptr, nullptr);
 
             CreateWindowA("STATIC", "Stream Status: Event-Driven Buffering (Zero Allocation in RT Callback)",
-                          WS_CHILD | WS_VISIBLE, 476, 374, 450, 18, hwnd, nullptr, nullptr, nullptr);
+                          WS_CHILD | WS_VISIBLE, 476, 358, 450, 18, hwnd, nullptr, nullptr, nullptr);
 
             // Group 5: AUTOMATED BENCHMARK MATRIX & STRESS TESTS
             CreateWindowA("BUTTON", "5. AUTOMATED BENCHMARK MATRIX & STRESS TESTS", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
@@ -3446,8 +3437,7 @@ LRESULT CALLBACK DeviceTestWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                     UpdateWindow(s_devUi.hEditLog);
                     auto matrix = s_devUi.backend->runBenchmarkMatrix(100);
                     std::ostringstream ss;
-                    ss << std::left << std::setw(10) << "ReqRate"
-                       << std::setw(10) << "ActRate"
+                    ss << std::left << std::setw(12) << "Rate (Hz)"
                        << std::setw(12) << "Req Block"
                        << std::setw(12) << "Act Block"
                        << std::setw(14) << "Status"
@@ -3457,10 +3447,9 @@ LRESULT CALLBACK DeviceTestWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                        << std::setw(12) << "Max (us)"
                        << std::setw(10) << "RT (%)"
                        << "Notes\r\n";
-                    ss << std::string(125, '-') << "\r\n";
+                    ss << std::string(105, '-') << "\r\n";
                     for (const auto& r : matrix) {
-                        ss << std::left << std::setw(10) << static_cast<uint32_t>(r.sampleRate)
-                           << std::setw(10) << static_cast<uint32_t>(r.actualSampleRate)
+                        ss << std::left << std::setw(12) << static_cast<uint32_t>(r.sampleRate)
                            << std::setw(12) << r.requestedBuffer
                            << std::setw(12) << r.actualBuffer
                            << std::setw(14) << r.status
@@ -3508,30 +3497,19 @@ LRESULT CALLBACK DeviceTestWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 SetWindowTextA(s_devUi.hTxtTelemetryCb, ssCb.str().c_str());
 
                 std::ostringstream ssDsp;
-                ssDsp << "Callback: Min " << d.minCallbackTimeUs << " | Avg " << d.avgCallbackTimeUs
+                ssDsp << "Callback Time: Min " << d.minCallbackTimeUs << " | Avg " << d.avgCallbackTimeUs
                       << " | Max " << d.maxCallbackTimeUs << " | P95 " << d.p95CallbackTimeUs << " | P99 " << d.p99CallbackTimeUs << " us";
                 SetWindowTextA(s_devUi.hTxtTelemetryDsp, ssDsp.str().c_str());
 
                 std::ostringstream ssUtil;
-                ssUtil << "DSP: Avg " << d.avgDspTimeUs << " | Max " << d.maxDspTimeUs << " us | Util "
-                       << std::fixed << std::setprecision(1) << d.realtimeUtilizationPercent
-                       << " % (Max " << d.maxRealtimeUtilizationPercent << " %) | Event: " << std::setprecision(2) << d.periodDurationMs
-                       << " ms / Block: " << d.engineBlockDurationMs << " ms";
+                ssUtil << "Realtime Utilization: " << std::fixed << std::setprecision(1) << d.realtimeUtilizationPercent
+                       << " % (Max " << d.maxRealtimeUtilizationPercent << " %) | Period: " << std::setprecision(2) << d.periodDurationMs << " ms";
                 SetWindowTextA(s_devUi.hTxtTelemetryUtil, ssUtil.str().c_str());
 
                 std::ostringstream ssXrun;
-                ssXrun << "XRUNs: Render under: " << d.renderUnderruns << " | Capture under/over: "
-                       << d.captureUnderflows << "/" << d.captureOverruns
+                ssXrun << "XRUNs: Underruns: " << d.renderUnderruns << " | Overruns: " << d.captureOverruns
                        << " | Deadlines: " << d.deadlineMisses << " | Discont: " << d.bufferDiscontinuities << " | Inval: " << d.deviceInvalidations;
                 SetWindowTextA(s_devUi.hTxtTelemetryXrun, ssXrun.str().c_str());
-
-                std::ostringstream ssStatus;
-                ssStatus << "CAPTURE: " << (d.captureOperational ? "RUNNING" : "STOPPED")
-                         << " | DSP: " << (d.dspOperational ? "RUNNING" : "STOPPED")
-                         << " | RENDER: " << (d.renderOperational ? "RUNNING" : "STOPPED")
-                         << " | Wait errors: " << d.eventWaitErrors << " | Wait timeouts: " << d.eventWaitTimeouts;
-                if (!d.lastErrorMessage.empty()) ssStatus << " | " << d.lastErrorMessage;
-                SetWindowTextA(s_devUi.hTxtOperationalStates, ssStatus.str().c_str());
 
                 // Check clock drift condition
                 int smIdx = (int)SendMessageA(s_devUi.hComboStreamMode, CB_GETCURSEL, 0, 0);
