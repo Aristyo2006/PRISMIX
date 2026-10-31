@@ -1,4 +1,5 @@
 #include "ui.h"
+
 #include "theme/theme.h"
 #include "screens/mixer_screen.h"
 #include "screens/channel_screen.h"
@@ -9,6 +10,7 @@
 #include "screens/system_screen.h"
 #include "widgets/instrument.h"
 #include "widgets/audio_setup_dialog.h"
+#include "widgets/system_dialogs.h"
 #include "assets/rack_textures.h"
 #include "ui_audio_bridge.h"
 #include "../model/mixer_state.h"
@@ -72,6 +74,7 @@ void nav_event(lv_event_t* e) {
 }
 
 void status_event(lv_timer_t*) {
+    prismix::ui::security_lock_overlay_sync();
     ui_update_status_bar();
     paint_nav();
     const auto snapshot = audio_service().snapshot();
@@ -437,4 +440,5 @@ void ui_init(void) {
         lv_obj_add_event_cb(nav_buttons[i], nav_event, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
     paint_nav();
+    prismix::ui::security_lock_overlay_sync();
 }

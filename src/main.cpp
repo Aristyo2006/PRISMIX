@@ -3,6 +3,7 @@
 #include <fstream>
 #include <string>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #if defined(_WIN32)
@@ -32,6 +33,7 @@
 #include "ui/theme/theme_model.h"
 #include "ui/widgets/audio_setup_dialog.h"
 #include "service/patchstorage/patchstorage_service.h"
+#include "service/security/security_service.h"
 #include "service/web/web_server.h"
 
 static std::string resolve_output_path(const std::string& filename) {
@@ -921,12 +923,24 @@ int main(int argc, char** argv) {
 
     entry_log << "Calling app_init" << std::endl;
     entry_log.flush();
+    auto& security = prismix::security::SecurityService::instance();
+    security.initialize();
     app_init();
     entry_log << "app_init completed" << std::endl;
     entry_log.flush();
 
-    // Start background web server for MODEP-style pedalboard editing
-    prismix::web::WebServer::instance().start(8888);
+    // Start the Web control server. The bind interface is derived from the
+    // persisted LAN-access policy; remote access is never enabled implicitly.
+    uint16_t web_port = 8888;
+    if (const char* configuredPort = std::getenv("PRISMIX_WEB_PORT")) {
+        try {
+            const int parsed = std::stoi(configuredPort);
+            if (parsed > 0 && parsed <= 65535) web_port = static_cast<uint16_t>(parsed);
+        } catch (...) {
+        }
+    }
+    const std::string web_bind = security.isLanAccessEnabled() ? "0.0.0.0" : "127.0.0.1";
+    prismix::web::WebServer::instance().start(web_port, web_bind);
     std::atexit([]() {
         prismix::web::WebServer::instance().stop();
     });

@@ -4,6 +4,10 @@
 #include "../widgets/instrument.h"
 #include "../assets/rack_textures.h"
 #include "../ui_audio_bridge.h"
+#include "../widgets/system_dialogs.h"
+#include "../../service/security/security_service.h"
+#include "../../service/system/system_service.h"
+#include "../../service/web/web_server.h"
 #include "../../backend/mock_audio_backend.h"
 #include "../../model/mixer_state.h"
 #include "../../model/audio_setup_config.h"
@@ -14,7 +18,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -24,15 +31,17 @@ void persistSetup() {
     ui_save_persisted_audio_setup(&error);
 }
 
-static int s_system_mode = 0; // 0 = Audio Engine & DSP, 1 = Appearance & Theme
+static int s_system_mode = 0; // 0 = Audio Engine & DSP, 1 = Appearance & Theme, 2 = System & Network
 
 struct SystemScreenView {
     // Mode toggle
     int active_mode = 0;
     lv_obj_t* mode_audio_btn = nullptr;
     lv_obj_t* mode_theme_btn = nullptr;
+    lv_obj_t* mode_system_btn = nullptr;
     lv_obj_t* audio_container = nullptr;
     lv_obj_t* theme_container = nullptr;
+    lv_obj_t* system_container = nullptr;
 
     // Audio Engine & DSP view objects
     lv_obj_t* mode = nullptr;
@@ -97,6 +106,36 @@ struct SystemScreenView {
     lv_obj_t* preview_txt_secondary = nullptr;
     lv_obj_t* preview_accent1_pill = nullptr;
     lv_obj_t* preview_accent2_pill = nullptr;
+
+    // System & Network view objects
+    lv_obj_t* sys_security_state = nullptr;
+    lv_obj_t* sys_access_mode = nullptr;
+    lv_obj_t* sys_pin_btn = nullptr;
+    lv_obj_t* sys_pin_btn_label = nullptr;
+    lv_obj_t* sys_lock_btn = nullptr;
+    lv_obj_t* sys_lan_btn = nullptr;
+    lv_obj_t* sys_lan_btn_label = nullptr;
+    lv_obj_t* sys_lan_state = nullptr;
+    lv_obj_t* sys_power_state = nullptr;
+    lv_obj_t* sys_restart_btn = nullptr;
+    lv_obj_t* sys_shutdown_btn = nullptr;
+    lv_obj_t* sys_network_nm = nullptr;
+    lv_obj_t* sys_network_connection = nullptr;
+    lv_obj_t* sys_network_ssid = nullptr;
+    lv_obj_t* sys_network_signal = nullptr;
+    lv_obj_t* sys_network_ipv4 = nullptr;
+    lv_obj_t* sys_network_device = nullptr;
+    lv_obj_t* sys_scan_btn = nullptr;
+    lv_obj_t* sys_network_note = nullptr;
+    lv_obj_t* sys_web_url = nullptr;
+    lv_obj_t* sys_web_mode = nullptr;
+    lv_obj_t* sys_web_bind = nullptr;
+    lv_obj_t* sys_web_note = nullptr;
+    uint32_t last_network_tick = 0;
+    uint32_t last_power_tick = 0;
+    uint32_t last_web_tick = 0;
+    uint32_t last_security_tick = 0;
+    uint64_t last_network_version = 0;
 };
 
 static SystemScreenView* s_active_system_view = nullptr;
@@ -181,42 +220,746 @@ void styleSwitch(lv_obj_t* sw) {
     lv_obj_set_style_radius(sw, LV_RADIUS_CIRCLE, LV_PART_KNOB);
 }
 
+void style_mode_button(lv_obj_t* button, bool active) {
+    if (!button) return;
+    lv_obj_set_style_bg_color(button, active ? COLOR_RAISED_PANEL : COLOR_CONTROL, 0);
+    lv_obj_set_style_border_color(button, active ? COLOR_SELECTED_BORDER : COLOR_STANDARD_BORDER, 0);
+    lv_obj_set_style_border_width(button, active ? 2 : 1, 0);
+    if (lv_obj_get_child_count(button) > 0) {
+        lv_obj_set_style_text_color(lv_obj_get_child(button, 0),
+                                    active ? COLOR_PRIMARY_TEXT : COLOR_SECONDARY_TEXT, 0);
+    }
+}
+
 void update_system_mode_view(SystemScreenView* v) {
     if (!v) return;
+    lv_obj_add_flag(v->audio_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(v->theme_container, LV_OBJ_FLAG_HIDDEN);
+    if (v->system_container) lv_obj_add_flag(v->system_container, LV_OBJ_FLAG_HIDDEN);
+
     if (v->active_mode == 0) {
         lv_obj_remove_flag(v->audio_container, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(v->theme_container, LV_OBJ_FLAG_HIDDEN);
-
-        lv_obj_set_style_bg_color(v->mode_audio_btn, COLOR_RAISED_PANEL, 0);
-        lv_obj_set_style_border_color(v->mode_audio_btn, COLOR_SELECTED_BORDER, 0);
-        lv_obj_set_style_border_width(v->mode_audio_btn, 2, 0);
-        lv_obj_set_style_text_color(lv_obj_get_child(v->mode_audio_btn, 0), COLOR_PRIMARY_TEXT, 0);
-
-        lv_obj_set_style_bg_color(v->mode_theme_btn, COLOR_CONTROL, 0);
-        lv_obj_set_style_border_color(v->mode_theme_btn, COLOR_STANDARD_BORDER, 0);
-        lv_obj_set_style_border_width(v->mode_theme_btn, 1, 0);
-        lv_obj_set_style_text_color(lv_obj_get_child(v->mode_theme_btn, 0), COLOR_SECONDARY_TEXT, 0);
-    } else {
-        lv_obj_add_flag(v->audio_container, LV_OBJ_FLAG_HIDDEN);
+    } else if (v->active_mode == 1) {
         lv_obj_remove_flag(v->theme_container, LV_OBJ_FLAG_HIDDEN);
-
-        lv_obj_set_style_bg_color(v->mode_audio_btn, COLOR_CONTROL, 0);
-        lv_obj_set_style_border_color(v->mode_audio_btn, COLOR_STANDARD_BORDER, 0);
-        lv_obj_set_style_border_width(v->mode_audio_btn, 1, 0);
-        lv_obj_set_style_text_color(lv_obj_get_child(v->mode_audio_btn, 0), COLOR_SECONDARY_TEXT, 0);
-
-        lv_obj_set_style_bg_color(v->mode_theme_btn, COLOR_RAISED_PANEL, 0);
-        lv_obj_set_style_border_color(v->mode_theme_btn, COLOR_SELECTED_BORDER, 0);
-        lv_obj_set_style_border_width(v->mode_theme_btn, 2, 0);
-        lv_obj_set_style_text_color(lv_obj_get_child(v->mode_theme_btn, 0), COLOR_PRIMARY_TEXT, 0);
+    } else {
+        if (v->system_container) lv_obj_remove_flag(v->system_container, LV_OBJ_FLAG_HIDDEN);
     }
+
+    style_mode_button(v->mode_audio_btn, v->active_mode == 0);
+    style_mode_button(v->mode_theme_btn, v->active_mode == 1);
+    style_mode_button(v->mode_system_btn, v->active_mode == 2);
 }
 
 void sync_theme_editor_controls(SystemScreenView* v);
 
+lv_obj_t* make_system_button(lv_obj_t* parent, const char* text, int x, int y,
+                                 int w, int h, lv_color_t accent) {
+    auto* button = lv_button_create(parent);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_size(button, w, h);
+    lv_obj_set_style_radius(button, 2, 0);
+    lv_obj_set_style_pad_all(button, 0, 0);
+    ui::rack_skin::apply_hardware_button(button, COLOR_CONTROL, accent, COLOR_PRIMARY_TEXT);
+    auto* label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    lv_obj_set_style_text_font(label, &ac_font_14, 0);
+    lv_obj_set_style_text_color(label, COLOR_PRIMARY_TEXT, 0);
+    return button;
+}
+
+lv_obj_t* system_button_label(lv_obj_t* button) {
+    return button && lv_obj_get_child_count(button) > 0 ? lv_obj_get_child(button, 0) : nullptr;
+}
+
+void set_button_enabled(lv_obj_t* button, bool enabled) {
+    if (!button) return;
+    if (enabled) lv_obj_remove_state(button, LV_STATE_DISABLED);
+    else lv_obj_add_state(button, LV_STATE_DISABLED);
+}
+
+void refresh_system_access_controls(SystemScreenView* v) {
+    if (!v) return;
+    auto& security = prismix::security::SecurityService::instance();
+    const bool configured = security.isPinConfigured();
+    const bool locked = security.isMixerLocked();
+    const bool lan = security.isLanAccessEnabled();
+
+    if (v->sys_security_state) {
+        lv_label_set_text(v->sys_security_state,
+            !configured ? "PIN PROTECTION: NOT CONFIGURED"
+            : locked ? "PIN PROTECTION: LOCKED"
+                     : "PIN PROTECTION: ENABLED");
+        lv_obj_set_style_text_color(v->sys_security_state,
+            !configured ? COLOR_YELLOW : (locked ? COLOR_RED : COLOR_GREEN), 0);
+    }
+    if (v->sys_access_mode) {
+        lv_label_set_text(v->sys_access_mode,
+            !configured ? "LOCAL CONSOLE ACCESS  /  NO PIN"
+            : lan ? "LAN ACCESS ENABLED  /  PIN REQUIRED"
+                  : "LOCAL CONSOLE ACCESS  /  PIN PROTECTED");
+        lv_obj_set_style_text_color(v->sys_access_mode,
+            lan ? COLOR_CYAN : COLOR_SECONDARY_TEXT, 0);
+    }
+    if (v->sys_pin_btn_label) {
+        lv_label_set_text(v->sys_pin_btn_label, configured ? "CHANGE PIN" : "SET UP PIN");
+    }
+    set_button_enabled(v->sys_lock_btn, configured && !locked);
+    set_button_enabled(v->sys_lan_btn, configured || lan);
+    if (v->sys_lan_btn_label) {
+        lv_label_set_text(v->sys_lan_btn_label, lan ? "DISABLE LAN ACCESS" : "ENABLE LAN ACCESS");
+    }
+    if (v->sys_lan_state) {
+        lv_label_set_text(v->sys_lan_state,
+            lan ? "LAN ACCESS: ENABLED  /  HTTP - NO TLS"
+                : "LAN ACCESS: DISABLED  /  LOCALHOST ONLY");
+        lv_obj_set_style_text_color(v->sys_lan_state, lan ? COLOR_YELLOW : COLOR_SECONDARY_TEXT, 0);
+    }
+}
+
+void refresh_system_power_controls(SystemScreenView* v) {
+    if (!v) return;
+    const auto power = prismix::system::SystemService::instance().get_power_status();
+    if (v->sys_power_state) {
+        if (power.available) {
+            lv_label_set_text_fmt(v->sys_power_state, "SYSTEMD POWER INTEGRATION: READY  /  %s",
+                                  power.integration.empty() ? "systemctl" : power.integration.c_str());
+            lv_obj_set_style_text_color(v->sys_power_state, COLOR_GREEN, 0);
+        } else {
+            lv_label_set_text(v->sys_power_state,
+                power.reason.empty() ? "SYSTEM POWER MANAGEMENT: UNAVAILABLE"
+                                     : ("SYSTEM POWER MANAGEMENT: " + power.reason).c_str());
+            lv_obj_set_style_text_color(v->sys_power_state, COLOR_YELLOW, 0);
+        }
+    }
+    set_button_enabled(v->sys_restart_btn, power.available);
+    set_button_enabled(v->sys_shutdown_btn, power.available);
+}
+
+void refresh_system_network_controls(SystemScreenView* v, bool force) {
+    if (!v) return;
+    const auto info = prismix::system::SystemService::instance().get_network_info(force);
+    if (v->sys_network_nm) {
+        lv_label_set_text_fmt(v->sys_network_nm, "NETWORKMANAGER: %s%s%s",
+            info.network_manager ? "AVAILABLE" : "UNAVAILABLE",
+            info.nm_state.empty() ? "" : "  /  ",
+            info.nm_state.c_str());
+        lv_obj_set_style_text_color(v->sys_network_nm,
+            info.network_manager ? COLOR_GREEN : COLOR_YELLOW, 0);
+    }
+    if (v->sys_network_connection) {
+        const std::string connection = info.connected
+            ? (info.connection_name.empty() ? "CONNECTED" : info.connection_name)
+            : "DISCONNECTED";
+        lv_label_set_text_fmt(v->sys_network_connection, "CONNECTION: %s  /  %s",
+                              connection.c_str(), info.connection_type.empty() ? "-" : info.connection_type.c_str());
+    }
+    if (v->sys_network_ssid) {
+        lv_label_set_text_fmt(v->sys_network_ssid, "WI-FI SSID: %s",
+                              info.wifi && !info.ssid.empty() ? info.ssid.c_str() : "-");
+    }
+    if (v->sys_network_signal) {
+        if (info.wifi && info.signal_percent >= 0) {
+            lv_label_set_text_fmt(v->sys_network_signal, "WI-FI SIGNAL: %d%%", info.signal_percent);
+        } else {
+            lv_label_set_text(v->sys_network_signal, "WI-FI SIGNAL: -");
+        }
+    }
+    if (v->sys_network_ipv4) {
+        lv_label_set_text_fmt(v->sys_network_ipv4, "IPV4: %s",
+                              info.ipv4.empty() ? "-" : info.ipv4.c_str());
+    }
+    if (v->sys_network_device) {
+        lv_label_set_text_fmt(v->sys_network_device, "INTERFACE: %s  /  %s",
+            info.interface_name.empty() ? "-" : info.interface_name.c_str(),
+            info.device_state.empty() ? "-" : info.device_state.c_str());
+    }
+    if (v->sys_network_note) {
+        std::string note;
+        if (!info.wifi_hardware) note = "No Wi-Fi hardware was detected. Wired networking may still be in use.";
+        else if (!info.error.empty()) note = info.error;
+        else note = "Wi-Fi credentials are sent only to the local NetworkManager service and are never displayed here.";
+        lv_label_set_text(v->sys_network_note, note.c_str());
+        lv_obj_set_style_text_color(v->sys_network_note,
+            (!info.wifi_hardware || !info.error.empty()) ? COLOR_YELLOW : COLOR_SECONDARY_TEXT, 0);
+    }
+    set_button_enabled(v->sys_scan_btn, info.wifi_hardware);
+}
+
+void refresh_system_web_controls(SystemScreenView* v) {
+    if (!v) return;
+    auto& server = prismix::web::WebServer::instance();
+    auto& security = prismix::security::SecurityService::instance();
+    const auto access = prismix::system::SystemService::instance().get_web_access(
+        server.port(), server.bind_address(), security.isLanAccessEnabled());
+
+    if (v->sys_web_url) {
+        lv_label_set_text(v->sys_web_url,
+            access.url.empty() ? "NO LAN WEB UI ADDRESS" : access.url.c_str());
+        lv_obj_set_style_text_color(v->sys_web_url,
+            access.url.empty() ? COLOR_YELLOW : COLOR_CYAN, 0);
+    }
+    if (v->sys_web_mode) {
+        lv_label_set_text(v->sys_web_mode,
+            access.local_only ? "LOCALHOST ONLY" : "LAN ACCESS");
+        lv_obj_set_style_text_color(v->sys_web_mode,
+            access.local_only ? COLOR_SECONDARY_TEXT : COLOR_YELLOW, 0);
+    }
+    if (v->sys_web_bind) {
+        lv_label_set_text_fmt(v->sys_web_bind, "BIND %s:%u  /  SCHEME %s  /  TRANSPORT HTTP - NO TLS",
+            access.bind_address.c_str(), static_cast<unsigned>(access.port),
+            access.scheme.c_str());
+    }
+    if (v->sys_web_note) {
+        lv_label_set_text(v->sys_web_note,
+            "HTTP provides no transport encryption. Enable LAN access only on a trusted network and share the address and PIN only with authorized operators.");
+    }
+}
+
+
+lv_obj_t* g_wifi_scan_backdrop = nullptr;
+lv_obj_t* g_wifi_connect_backdrop = nullptr;
+
+void close_wifi_scan_modal() {
+    if (!g_wifi_scan_backdrop) return;
+    lv_obj_t* backdrop = g_wifi_scan_backdrop;
+    g_wifi_scan_backdrop = nullptr;
+    lv_obj_delete(backdrop);
+}
+
+struct WifiScanModalContext {
+    lv_obj_t* backdrop = nullptr;
+    lv_obj_t* list = nullptr;
+    lv_obj_t* status = nullptr;
+    lv_timer_t* timer = nullptr;
+    bool rendered = false;
+};
+
+struct WifiRowInfo {
+    std::string ssid;
+    bool secured = false;
+    bool active = false;
+};
+
+struct WifiConnectState {
+    std::mutex mutex;
+    bool done = false;
+    bool success = false;
+    std::string error;
+};
+
+struct WifiConnectDialogContext {
+    lv_obj_t* backdrop = nullptr;
+    std::string ssid;
+    lv_obj_t* status = nullptr;
+    lv_obj_t* connect_btn = nullptr;
+    lv_obj_t* cancel_btn = nullptr;
+    lv_obj_t* password = nullptr;
+    lv_timer_t* timer = nullptr;
+    std::shared_ptr<WifiConnectState> state;
+};
+
+void close_wifi_connect_dialog() {
+    if (!g_wifi_connect_backdrop) return;
+    lv_obj_t* backdrop = g_wifi_connect_backdrop;
+    g_wifi_connect_backdrop = nullptr;
+    lv_obj_delete(backdrop);
+}
+
+void show_wifi_connect_dialog(const std::string& ssid, bool secured, bool active);
+
+void wifi_scan_modal_delete_cb(lv_event_t* event) {
+    auto* ctx = static_cast<WifiScanModalContext*>(lv_event_get_user_data(event));
+    if (ctx) {
+        if (ctx->timer) lv_timer_delete(ctx->timer);
+        if (g_wifi_scan_backdrop == ctx->backdrop) g_wifi_scan_backdrop = nullptr;
+        delete ctx;
+    }
+}
+
+void wifi_scan_poll_cb(lv_timer_t* timer) {
+    auto* ctx = static_cast<WifiScanModalContext*>(lv_timer_get_user_data(timer));
+    if (!ctx || !ctx->backdrop) return;
+    bool scanning = false;
+    const auto result = prismix::system::SystemService::instance().wifi_scan_snapshot(scanning);
+
+    if (ctx->status) {
+        if (scanning) {
+            lv_label_set_text(ctx->status, "SCANNING NETWORKMANAGER... This can take a few seconds.");
+            lv_obj_set_style_text_color(ctx->status, COLOR_SECONDARY_TEXT, 0);
+        } else if (!result.success) {
+            lv_label_set_text(ctx->status, result.error.empty() ? "Wi-Fi scan failed." : result.error.c_str());
+            lv_obj_set_style_text_color(ctx->status, COLOR_YELLOW, 0);
+        } else {
+            lv_label_set_text_fmt(ctx->status, "%zu WI-FI NETWORK%s FOUND", result.networks.size(),
+                                  result.networks.size() == 1 ? "" : "S");
+            lv_obj_set_style_text_color(ctx->status, COLOR_SECONDARY_TEXT, 0);
+        }
+    }
+    if (scanning || ctx->rendered) return;
+    ctx->rendered = true;
+    if (!ctx->list) return;
+    lv_obj_clean(ctx->list);
+    if (!result.networks.empty()) {
+        const int row_height = 76;
+        int y = 8;
+        for (const auto& network : result.networks) {
+            auto* row = lv_button_create(ctx->list);
+            lv_obj_set_pos(row, 8, y);
+            lv_obj_set_size(row, 1080, 64);
+            lv_obj_set_style_radius(row, 1, 0);
+            lv_obj_set_style_pad_all(row, 0, 0);
+            ui::rack_skin::apply_hardware_button(row, network.active ? COLOR_RAISED_PANEL : COLOR_CONTROL,
+                                                 network.active ? COLOR_GREEN : COLOR_STANDARD_BORDER,
+                                                 COLOR_PRIMARY_TEXT);
+            auto* info = new WifiRowInfo{network.ssid, network.secured, network.active};
+            lv_obj_add_event_cb(row, [](lv_event_t* event) {
+                auto* info = static_cast<WifiRowInfo*>(lv_event_get_user_data(event));
+                if (!info) return;
+                if (info->active) {
+                    prismix::ui::security_dialog_show_message(
+                        "WI-FI CONNECTION",
+                        info->ssid + " is already the active Wi-Fi connection.");
+                    return;
+                }
+                show_wifi_connect_dialog(info->ssid, info->secured, info->active);
+            }, LV_EVENT_CLICKED, info);
+            lv_obj_add_event_cb(row, [](lv_event_t* event) {
+                delete static_cast<WifiRowInfo*>(lv_event_get_user_data(event));
+            }, LV_EVENT_DELETE, info);
+
+            auto* name = lv_label_create(row);
+            lv_obj_set_pos(name, 18, 10);
+            lv_label_set_text(name, network.ssid.c_str());
+            lv_obj_set_style_text_font(name, &ac_font_16, 0);
+            lv_obj_set_style_text_color(name, COLOR_PRIMARY_TEXT, 0);
+
+            auto* meta = lv_label_create(row);
+            lv_obj_set_pos(meta, 18, 34);
+            lv_label_set_text_fmt(meta, "%s  /  %s  /  %d%%",
+                network.active ? "ACTIVE" : (network.secured ? "SECURED" : "OPEN"),
+                network.security.empty() ? "-" : network.security.c_str(),
+                network.signal_percent);
+            lv_obj_set_style_text_font(meta, &ac_font_12, 0);
+            lv_obj_set_style_text_color(meta, COLOR_SECONDARY_TEXT, 0);
+
+            auto* action = lv_label_create(row);
+            lv_obj_align(action, LV_ALIGN_RIGHT_MID, -18, 0);
+            lv_label_set_text(action, network.active ? "CONNECTED" : "CONNECT");
+            lv_obj_set_style_text_font(action, &ac_font_12, 0);
+            lv_obj_set_style_text_color(action, network.active ? COLOR_GREEN : COLOR_CYAN, 0);
+            y += row_height;
+        }
+    } else {
+        auto* empty = lv_label_create(ctx->list);
+        lv_label_set_text(empty, result.success ? "No Wi-Fi networks were found." : "No Wi-Fi scan results are available.");
+        lv_obj_set_style_text_font(empty, &ac_font_14, 0);
+        lv_obj_set_style_text_color(empty, COLOR_SECONDARY_TEXT, 0);
+        lv_obj_set_pos(empty, 20, 20);
+    }
+}
+
+void show_wifi_scan_modal() {
+    close_wifi_scan_modal();
+    prismix::ui::security_dialog_close_all();
+
+    auto* ctx = new WifiScanModalContext{};
+    auto* backdrop = lv_obj_create(lv_layer_top());
+    ctx->backdrop = backdrop;
+    g_wifi_scan_backdrop = backdrop;
+    lv_obj_set_pos(backdrop, 0, 0);
+    lv_obj_set_size(backdrop, 1920, 1080);
+    lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(backdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(backdrop, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(backdrop, 0, 0);
+    lv_obj_set_style_radius(backdrop, 0, 0);
+
+    auto* panel = lv_obj_create(backdrop);
+    lv_obj_set_size(panel, 1200, 780);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    ui::rack_skin::apply_faceplate_panel(panel, true);
+    lv_obj_set_style_bg_color(panel, COLOR_PANEL_SURFACE, 0);
+    lv_obj_set_style_border_color(panel, COLOR_SELECTED_BORDER, 0);
+    lv_obj_set_style_border_width(panel, 2, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    auto* title = lv_label_create(panel);
+    lv_obj_set_pos(title, 32, 24);
+    lv_label_set_text(title, "WI-FI NETWORKS");
+    lv_obj_set_style_text_font(title, &ac_font_28, 0);
+    lv_obj_set_style_text_color(title, COLOR_PRIMARY_TEXT, 0);
+
+    auto* explanation = lv_label_create(panel);
+    lv_obj_set_pos(explanation, 32, 60);
+    lv_obj_set_width(explanation, 1120);
+    lv_label_set_long_mode(explanation, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(explanation,
+        "Live NetworkManager scan. Selecting a secured network opens a local password entry dialog; credentials are never logged or returned.");
+    lv_obj_set_style_text_font(explanation, &ac_font_12, 0);
+    lv_obj_set_style_text_color(explanation, COLOR_SECONDARY_TEXT, 0);
+
+    ctx->list = lv_obj_create(panel);
+    lv_obj_set_pos(ctx->list, 32, 106);
+    lv_obj_set_size(ctx->list, 1136, 502);
+    lv_obj_set_style_bg_color(ctx->list, COLOR_RECESSED, 0);
+    lv_obj_set_style_bg_opa(ctx->list, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(ctx->list, COLOR_STANDARD_BORDER, 0);
+    lv_obj_set_style_border_width(ctx->list, 1, 0);
+    lv_obj_set_style_radius(ctx->list, 1, 0);
+    lv_obj_set_style_pad_all(ctx->list, 0, 0);
+    lv_obj_set_scrollbar_mode(ctx->list, LV_SCROLLBAR_MODE_AUTO);
+
+    ctx->status = lv_label_create(panel);
+    lv_obj_set_pos(ctx->status, 32, 626);
+    lv_obj_set_width(ctx->status, 1136);
+    lv_label_set_text(ctx->status, "STARTING WI-FI SCAN...");
+    lv_obj_set_style_text_font(ctx->status, &ac_font_14, 0);
+    lv_obj_set_style_text_color(ctx->status, COLOR_SECONDARY_TEXT, 0);
+
+    auto* refresh = make_system_button(panel, "REFRESH SCAN", 32, 684, 250, 56, COLOR_SELECTED_BORDER);
+    lv_obj_add_event_cb(refresh, [](lv_event_t* event) {
+        auto* ctx = static_cast<WifiScanModalContext*>(lv_event_get_user_data(event));
+        if (!ctx) return;
+        ctx->rendered = false;
+        if (ctx->list) lv_obj_clean(ctx->list);
+        prismix::system::SystemService::instance().start_wifi_scan(true);
+    }, LV_EVENT_CLICKED, ctx);
+
+    auto* close = make_system_button(panel, "CLOSE", 918, 684, 250, 56, COLOR_STANDARD_BORDER);
+    lv_obj_add_event_cb(close, [](lv_event_t*) {
+        close_wifi_scan_modal();
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_add_event_cb(backdrop, wifi_scan_modal_delete_cb, LV_EVENT_DELETE, ctx);
+    ctx->timer = lv_timer_create(wifi_scan_poll_cb, 250, ctx);
+    prismix::system::SystemService::instance().start_wifi_scan(true);
+}
+
+void wifi_connect_poll_cb(lv_timer_t* timer) {
+    auto* ctx = static_cast<WifiConnectDialogContext*>(lv_timer_get_user_data(timer));
+    if (!ctx || !ctx->state) return;
+    bool done = false;
+    bool success = false;
+    std::string error;
+    {
+        std::lock_guard<std::mutex> lock(ctx->state->mutex);
+        done = ctx->state->done;
+        success = ctx->state->success;
+        error = ctx->state->error;
+    }
+    if (!done) return;
+
+    if (ctx->timer) {
+        lv_timer_delete(ctx->timer);
+        ctx->timer = nullptr;
+    }
+    lv_obj_t* backdrop = ctx->backdrop;
+    if (g_wifi_connect_backdrop == backdrop) g_wifi_connect_backdrop = nullptr;
+    lv_obj_delete(backdrop);
+    if (success) {
+        close_wifi_scan_modal();
+        prismix::ui::security_dialog_show_message(
+            "WI-FI CONNECTED",
+            "NetworkManager accepted the connection. The network status will refresh automatically; the PRISMIX audio engine was not stopped.");
+    } else {
+        prismix::ui::security_dialog_show_message(
+            "WI-FI CONNECTION FAILED",
+            error.empty() ? "NetworkManager did not accept the connection." : error);
+    }
+}
+
+void wifi_connect_dialog_delete_cb(lv_event_t* event) {
+    auto* ctx = static_cast<WifiConnectDialogContext*>(lv_event_get_user_data(event));
+    if (ctx) {
+        if (ctx->timer) lv_timer_delete(ctx->timer);
+        if (g_wifi_connect_backdrop == ctx->backdrop) g_wifi_connect_backdrop = nullptr;
+        delete ctx;
+    }
+}
+
+void show_wifi_connect_dialog(const std::string& ssid, bool secured, bool active) {
+    if (active) {
+        prismix::ui::security_dialog_show_message("WI-FI CONNECTION", ssid + " is already connected.");
+        return;
+    }
+    close_wifi_connect_dialog();
+    prismix::ui::security_dialog_close_all();
+
+    auto* ctx = new WifiConnectDialogContext{};
+    auto* backdrop = lv_obj_create(lv_layer_top());
+    ctx->backdrop = backdrop;
+    ctx->ssid = ssid;
+    g_wifi_connect_backdrop = backdrop;
+    lv_obj_set_pos(backdrop, 0, 0);
+    lv_obj_set_size(backdrop, 1920, 1080);
+    lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(backdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(backdrop, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(backdrop, 0, 0);
+    lv_obj_set_style_radius(backdrop, 0, 0);
+
+    const int panel_height = secured ? 410 : 300;
+    auto* panel = lv_obj_create(backdrop);
+    lv_obj_set_size(panel, 820, panel_height);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, secured ? -160 : -40);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    ui::rack_skin::apply_faceplate_panel(panel, true);
+    lv_obj_set_style_bg_color(panel, COLOR_PANEL_SURFACE, 0);
+    lv_obj_set_style_border_color(panel, COLOR_SELECTED_BORDER, 0);
+    lv_obj_set_style_border_width(panel, 2, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+
+    auto* title = lv_label_create(panel);
+    lv_obj_set_pos(title, 32, 24);
+    lv_label_set_text(title, "CONNECT TO WI-FI");
+    lv_obj_set_style_text_font(title, &ac_font_28, 0);
+    lv_obj_set_style_text_color(title, COLOR_PRIMARY_TEXT, 0);
+
+    auto* network = lv_label_create(panel);
+    lv_obj_set_pos(network, 32, 70);
+    lv_label_set_text_fmt(network, "%s  /  %s", ssid.c_str(), secured ? "SECURED" : "OPEN NETWORK");
+    lv_obj_set_style_text_font(network, &ac_font_16, 0);
+    lv_obj_set_style_text_color(network, COLOR_CYAN, 0);
+
+    auto* note = lv_label_create(panel);
+    lv_obj_set_pos(note, 32, 102);
+    lv_obj_set_width(note, 756);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(note,
+        "The PRISMIX audio engine and DSP continue running. Changing networks can interrupt the Web UI if its LAN address changes.");
+    lv_obj_set_style_text_font(note, &ac_font_12, 0);
+    lv_obj_set_style_text_color(note, COLOR_SECONDARY_TEXT, 0);
+
+    if (secured) {
+        auto* label = lv_label_create(panel);
+        lv_obj_set_pos(label, 32, 156);
+        lv_label_set_text(label, "WI-FI PASSWORD");
+        lv_obj_set_style_text_font(label, &ac_font_12, 0);
+        lv_obj_set_style_text_color(label, COLOR_SECONDARY_TEXT, 0);
+
+        ctx->password = lv_textarea_create(panel);
+        lv_obj_set_pos(ctx->password, 32, 180);
+        lv_obj_set_size(ctx->password, 756, 56);
+        lv_textarea_set_one_line(ctx->password, true);
+        lv_textarea_set_password_mode(ctx->password, true);
+        lv_textarea_set_password_bullet(ctx->password, "*");
+        lv_textarea_set_max_length(ctx->password, 63);
+        lv_textarea_set_placeholder_text(ctx->password, "8 TO 63 PRINTABLE CHARACTERS");
+        lv_obj_set_style_bg_color(ctx->password, COLOR_RECESSED, 0);
+        lv_obj_set_style_bg_opa(ctx->password, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(ctx->password, COLOR_STANDARD_BORDER, 0);
+        lv_obj_set_style_border_width(ctx->password, 1, 0);
+        lv_obj_set_style_text_font(ctx->password, &ac_font_20, 0);
+        lv_obj_set_style_text_color(ctx->password, COLOR_PRIMARY_TEXT, 0);
+        lv_obj_set_style_pad_left(ctx->password, 12, 0);
+        lv_obj_set_style_text_color(ctx->password, COLOR_TEXT2, LV_PART_TEXTAREA_PLACEHOLDER);
+        lv_obj_set_style_text_opa(ctx->password, LV_OPA_60, LV_PART_TEXTAREA_PLACEHOLDER);
+    }
+
+    ctx->status = lv_label_create(panel);
+    lv_obj_set_pos(ctx->status, 32, secured ? 248 : 156);
+    lv_obj_set_width(ctx->status, 756);
+    lv_label_set_long_mode(ctx->status, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(ctx->status, secured
+        ? "The password is sent only to the local NetworkManager service."
+        : "This network is open. No password will be requested.");
+    lv_obj_set_style_text_font(ctx->status, &ac_font_12, 0);
+    lv_obj_set_style_text_color(ctx->status, COLOR_SECONDARY_TEXT, 0);
+
+    const int footer_y = panel_height - 78;
+    ctx->cancel_btn = make_system_button(panel, "CANCEL", 32, footer_y, 210, 56, COLOR_STANDARD_BORDER);
+    lv_obj_add_event_cb(ctx->cancel_btn, [](lv_event_t*) {
+        close_wifi_connect_dialog();
+    }, LV_EVENT_CLICKED, nullptr);
+
+    ctx->connect_btn = make_system_button(panel, "CONNECT", 820 - 32 - 300, footer_y, 300, 56, COLOR_ACCENT);
+    lv_obj_add_event_cb(ctx->connect_btn, [](lv_event_t* event) {
+        auto* ctx = static_cast<WifiConnectDialogContext*>(lv_event_get_user_data(event));
+        if (!ctx || ctx->state) return;
+        std::string password;
+        if (ctx->password) password = lv_textarea_get_text(ctx->password);
+        if (ctx->password && (password.size() < 8 || password.size() > 63)) {
+            lv_label_set_text(ctx->status, "Enter a Wi-Fi password containing 8 to 63 printable characters.");
+            lv_obj_set_style_text_color(ctx->status, COLOR_RED, 0);
+            return;
+        }
+        if (ctx->password) lv_textarea_set_text(ctx->password, "");
+        ctx->state = std::make_shared<WifiConnectState>();
+        auto state = ctx->state;
+        auto* service = &prismix::system::SystemService::instance();
+        const std::string connect_ssid = ctx->ssid;
+        std::thread([state, service, connect_ssid, password]() {
+            std::string error;
+            const bool ok = service->connect_wifi(connect_ssid, password, error);
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->done = true;
+            state->success = ok;
+            state->error = error;
+        }).detach();
+        lv_obj_add_state(ctx->connect_btn, LV_STATE_DISABLED);
+        lv_obj_add_state(ctx->cancel_btn, LV_STATE_DISABLED);
+        lv_label_set_text(ctx->status, "CONNECTING TO WI-FI... NetworkManager can take several seconds.");
+        lv_obj_set_style_text_color(ctx->status, COLOR_YELLOW, 0);
+        ctx->timer = lv_timer_create(wifi_connect_poll_cb, 250, ctx);
+        close_wifi_scan_modal();
+    }, LV_EVENT_CLICKED, ctx);
+
+    if (secured && ctx->password) {
+        auto* keyboard = lv_keyboard_create(backdrop);
+        lv_obj_set_size(keyboard, 840, 300);
+        lv_obj_align(keyboard, LV_ALIGN_BOTTOM_MID, 0, -50);
+        lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+        lv_keyboard_set_textarea(keyboard, ctx->password);
+        lv_obj_set_style_bg_color(keyboard, COLOR_RECESSED, 0);
+        lv_obj_set_style_bg_opa(keyboard, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(keyboard, COLOR_STANDARD_BORDER, 0);
+        lv_obj_set_style_border_width(keyboard, 1, 0);
+        lv_obj_set_style_text_color(keyboard, COLOR_PRIMARY_TEXT, LV_PART_ITEMS);
+        lv_obj_set_style_bg_color(keyboard, COLOR_CONTROL, LV_PART_ITEMS);
+        lv_obj_set_style_border_color(keyboard, COLOR_STANDARD_BORDER, LV_PART_ITEMS);
+        lv_obj_add_event_cb(keyboard, [](lv_event_t* event) {
+            auto* ctx = static_cast<WifiConnectDialogContext*>(lv_event_get_user_data(event));
+            if (ctx && ctx->connect_btn) lv_obj_send_event(ctx->connect_btn, LV_EVENT_CLICKED, nullptr);
+        }, LV_EVENT_READY, ctx);
+    }
+
+    lv_obj_add_event_cb(backdrop, wifi_connect_dialog_delete_cb, LV_EVENT_DELETE, ctx);
+}
+
+
+
+void request_system_power_action(const char* operation) {
+    const std::string op = operation ? operation : "";
+    if (op != "restart" && op != "shutdown") return;
+    const auto power = prismix::system::SystemService::instance().get_power_status();
+    if (!power.available) {
+        prismix::ui::security_dialog_show_message(
+            "SYSTEM POWER UNAVAILABLE",
+            power.reason.empty() ? "System power management is not available on this host." : power.reason);
+        return;
+    }
+    const bool restart = op == "restart";
+    const std::string title = restart ? "CONFIRM SYSTEM RESTART" : "CONFIRM SYSTEM SHUTDOWN";
+    const std::string message = restart
+        ? "The PRISMIX audio engine will be stopped in an orderly manner, then the host will be asked to restart through systemd. The Web UI and console will become unavailable."
+        : "The PRISMIX audio engine will be stopped in an orderly manner, then the host will be asked to power off through systemd. The Web UI and console will become unavailable immediately.";
+    const std::string confirm = restart ? "RESTART HOST" : "SHUT DOWN HOST";
+    prismix::ui::security_dialog_show_confirm(title, message, confirm, true, [op]() {
+        const auto snapshot = audio_service().snapshot();
+        const bool was_real_active =
+            snapshot.mode == AudioMode::RealAudio &&
+            (snapshot.state == AudioServiceState::Streaming ||
+             snapshot.state == AudioServiceState::Initializing);
+        const bool was_sim_running =
+            snapshot.mode == AudioMode::Simulation && g_backend.is_running();
+
+        if (was_real_active) ui_stop_real_audio();
+        if (was_sim_running) g_backend.stop();
+
+        std::string error;
+        const bool accepted = prismix::system::SystemService::instance().request_power(op, error);
+        if (!accepted) {
+            if (was_sim_running) g_backend.start();
+            if (was_real_active) {
+                std::string restart_error;
+                ui_start_real_audio(&restart_error);
+            }
+            prismix::ui::security_dialog_show_message(
+                "POWER REQUEST FAILED",
+                error.empty() ? "The operating system rejected the power request." : error);
+            return;
+        }
+        prismix::ui::security_dialog_show_message(
+            op == "restart" ? "RESTART REQUEST ACCEPTED" : "SHUTDOWN REQUEST ACCEPTED",
+            "The orderly audio shutdown completed and systemd accepted the request. The host may become unavailable at any moment.");
+    });
+}
+
+void request_lan_access_toggle() {
+    auto& security = prismix::security::SecurityService::instance();
+    const bool enable = !security.isLanAccessEnabled();
+    if (enable && !security.isPinConfigured()) {
+        prismix::ui::security_dialog_show_message(
+            "PIN REQUIRED FOR LAN ACCESS",
+            "Set up a console PIN before enabling LAN access. The Web UI remains localhost-only until then.");
+        return;
+    }
+    const std::string title = enable ? "ENABLE LAN WEB ACCESS?" : "DISABLE LAN WEB ACCESS?";
+    const std::string message = enable
+        ? "The Web server will bind to 0.0.0.0 and become reachable from the local network. Every remote request requires the console PIN. This server uses HTTP without TLS, so enable LAN access only on a trusted network."
+        : "The Web server will return to 127.0.0.1. Existing remote browser sessions will lose access immediately. The audio engine is not affected.";
+    prismix::ui::security_dialog_show_confirm(title, message,
+        enable ? "ENABLE LAN" : "USE LOCALHOST ONLY", enable, [enable]() {
+            auto& security = prismix::security::SecurityService::instance();
+            std::string error;
+            if (!security.setLanAccess(enable, error)) {
+                prismix::ui::security_dialog_show_message(
+                    "LAN ACCESS FAILED",
+                    error.empty() ? "The LAN access setting could not be saved." : error);
+                return;
+            }
+            const std::string bind = enable ? "0.0.0.0" : "127.0.0.1";
+            if (!prismix::web::WebServer::instance().request_bind_address(bind)) {
+                prismix::ui::security_dialog_show_message(
+                    "LAN ACCESS FAILED",
+                    "The Web listener rejected the requested bind address.");
+                return;
+            }
+            prismix::ui::security_dialog_show_message(
+                enable ? "LAN ACCESS ENABLED" : "LOCALHOST ONLY",
+                enable
+                    ? "The Web listener is rebinding to 0.0.0.0. Remote access requires the console PIN. HTTP has no transport encryption."
+                    : "The Web listener is rebinding to 127.0.0.1. Remote browser sessions have been disconnected.");
+        });
+}
+
+void request_mixer_lock() {
+    prismix::ui::security_dialog_show_confirm(
+        "LOCK MIXER?",
+        "Console and Web controls will be blocked until the PIN is verified. The audio engine continues running; no channel is muted and the DSP/mix state is preserved.",
+        "LOCK MIXER", true, []() {
+            auto& security = prismix::security::SecurityService::instance();
+            std::string error;
+            if (!security.lockMixer(error)) {
+                prismix::ui::security_dialog_show_message(
+                    "LOCK FAILED",
+                    error.empty() ? "The mixer could not be locked." : error);
+                return;
+            }
+            prismix::ui::security_lock_overlay_show();
+        });
+}
+
+
 void updateScreen(lv_timer_t* timer) {
     auto* view = static_cast<SystemScreenView*>(lv_timer_get_user_data(timer));
     if (!view) return;
+
+    if (view->active_mode == 2) {
+        const uint32_t now = lv_tick_get();
+        if (now - view->last_security_tick >= 500) {
+            view->last_security_tick = now;
+            refresh_system_access_controls(view);
+        }
+        if (now - view->last_power_tick >= 5000) {
+            view->last_power_tick = now;
+            refresh_system_power_controls(view);
+        }
+        if (now - view->last_web_tick >= 5000) {
+            view->last_web_tick = now;
+            refresh_system_web_controls(view);
+        }
+        if (now - view->last_network_tick >= 5000) {
+            const bool force = now - view->last_network_tick >= 30000;
+            view->last_network_tick = now;
+            refresh_system_network_controls(view, force);
+        }
+    }
+
     auto& service = audio_service();
     const auto snapshot = service.snapshot();
     const bool real = (snapshot.mode == AudioMode::RealAudio);
@@ -491,9 +1234,13 @@ void sync_theme_editor_controls(SystemScreenView* v) {
 } // anonymous namespace
 
 void system_screen_set_mode(int mode) {
-    s_system_mode = mode;
+    s_system_mode = std::clamp(mode, 0, 2);
     if (s_active_system_view) {
-        s_active_system_view->active_mode = mode;
+        s_active_system_view->active_mode = s_system_mode;
+        s_active_system_view->last_security_tick = 0;
+        s_active_system_view->last_power_tick = 0;
+        s_active_system_view->last_network_tick = 0;
+        s_active_system_view->last_web_tick = 0;
         update_system_mode_view(s_active_system_view);
     }
 }
@@ -550,6 +1297,15 @@ lv_obj_t* system_screen_create(void) {
     lv_label_set_text(tl, "APPEARANCE & UI THEME");
     lv_obj_center(tl);
     lv_obj_set_style_text_font(tl, &ac_font_14, 0);
+
+    view->mode_system_btn = lv_button_create(top_bar);
+    lv_obj_set_size(view->mode_system_btn, 240, 34);
+    lv_obj_set_pos(view->mode_system_btn, 500, 1);
+    lv_obj_set_style_radius(view->mode_system_btn, 1, 0);
+    auto* sl = lv_label_create(view->mode_system_btn);
+    lv_label_set_text(sl, "SYSTEM & NETWORK");
+    lv_obj_center(sl);
+    lv_obj_set_style_text_font(sl, &ac_font_14, 0);
 
     // =============================================================
     // 1. AUDIO ENGINE & DSP VIEW CONTAINER
@@ -1269,6 +2025,162 @@ lv_obj_t* system_screen_create(void) {
     instrument_label(prevCard3, "● BYPASS", 188, 138, &ac_font_12, COLOR_ORANGE);
     instrument_label(prevCard3, "● CLIPPING", 370, 138, &ac_font_12, COLOR_RED);
 
+
+    // =============================================================
+    // 3. SYSTEM & NETWORK VIEW CONTAINER
+    // =============================================================
+    view->system_container = lv_obj_create(screen);
+    lv_obj_set_pos(view->system_container, 0, 94);
+    lv_obj_set_size(view->system_container, 1920, 920);
+    lv_obj_remove_flag(view->system_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(view->system_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(view->system_container, 0, 0);
+    lv_obj_set_style_pad_all(view->system_container, 0, 0);
+
+    // SYSTEM POWER
+    auto* power_panel = instrument_panel(view->system_container, 16, 8, 932, 440,
+                                         "SYSTEM POWER / HOST ACTIONS");
+    instrument_label(power_panel, "ALLOWLISTED SYSTEMD OPERATIONS", 24, 52, &ac_font_12, COLOR_TEXT2);
+    view->sys_power_state = instrument_label(power_panel, "SYSTEMD POWER INTEGRATION: CHECKING...",
+                                             24, 80, &ac_font_14, COLOR_CYAN);
+    lv_obj_set_width(view->sys_power_state, 884);
+    lv_label_set_long_mode(view->sys_power_state, LV_LABEL_LONG_WRAP);
+    auto* power_note = instrument_label(power_panel,
+        "Restart and shutdown stop the audio engine in an orderly manner, then send only a fixed systemctl request. No arbitrary command execution is exposed.",
+        24, 124, &ac_font_12, COLOR_TEXT2);
+    lv_obj_set_width(power_note, 884);
+    lv_label_set_long_mode(power_note, LV_LABEL_LONG_WRAP);
+
+    view->sys_restart_btn = make_system_button(power_panel, "RESTART HOST", 24, 230, 420, 64, COLOR_ORANGE);
+    lv_obj_add_event_cb(view->sys_restart_btn, [](lv_event_t*) {
+        request_system_power_action("restart");
+    }, LV_EVENT_CLICKED, nullptr);
+    view->sys_shutdown_btn = make_system_button(power_panel, "SHUT DOWN HOST", 488, 230, 420, 64, COLOR_RED);
+    lv_obj_add_event_cb(view->sys_shutdown_btn, [](lv_event_t*) {
+        request_system_power_action("shutdown");
+    }, LV_EVENT_CLICKED, nullptr);
+
+    auto* power_warning = instrument_label(power_panel,
+        "Each action requires a separate confirmation. Real restart/shutdown is never triggered by opening the dialog.",
+        24, 322, &ac_font_12, COLOR_SECONDARY_TEXT);
+    lv_obj_set_width(power_warning, 884);
+    lv_label_set_long_mode(power_warning, LV_LABEL_LONG_WRAP);
+
+    // ACCESS & SECURITY
+    auto* access_panel = instrument_panel(view->system_container, 956, 8, 932, 440,
+                                          "ACCESS & SECURITY / MIXER LOCK");
+    view->sys_security_state = instrument_label(access_panel, "PIN PROTECTION: CHECKING...",
+                                                24, 52, &ac_font_16, COLOR_CYAN);
+    view->sys_access_mode = instrument_label(access_panel, "LOCAL CONSOLE ACCESS",
+                                             24, 82, &ac_font_12, COLOR_TEXT2);
+    lv_obj_set_width(view->sys_access_mode, 884);
+
+    view->sys_pin_btn = make_system_button(access_panel, "SET UP PIN", 24, 124, 420, 58,
+                                           COLOR_SELECTED_BORDER);
+    view->sys_pin_btn_label = system_button_label(view->sys_pin_btn);
+    lv_obj_add_event_cb(view->sys_pin_btn, [](lv_event_t*) {
+        auto& security = prismix::security::SecurityService::instance();
+        const auto purpose = security.isPinConfigured()
+            ? prismix::ui::PinPurpose::Change
+            : prismix::ui::PinPurpose::Setup;
+        prismix::ui::security_dialog_show_pin(purpose, [](bool success) {
+            if (success && s_active_system_view) {
+                refresh_system_access_controls(s_active_system_view);
+                s_active_system_view->last_security_tick = 0;
+            }
+        });
+    }, LV_EVENT_CLICKED, nullptr);
+
+    view->sys_lock_btn = make_system_button(access_panel, "LOCK MIXER", 488, 124, 420, 58,
+                                            COLOR_RED);
+    lv_obj_add_event_cb(view->sys_lock_btn, [](lv_event_t*) {
+        request_mixer_lock();
+    }, LV_EVENT_CLICKED, nullptr);
+
+    view->sys_lan_state = instrument_label(access_panel,
+        "LAN ACCESS: CHECKING...", 24, 206, &ac_font_14, COLOR_TEXT2);
+    view->sys_lan_btn = make_system_button(access_panel, "ENABLE LAN ACCESS", 24, 244, 420, 58,
+                                           COLOR_YELLOW);
+    view->sys_lan_btn_label = system_button_label(view->sys_lan_btn);
+    lv_obj_add_event_cb(view->sys_lan_btn, [](lv_event_t*) {
+        request_lan_access_toggle();
+    }, LV_EVENT_CLICKED, nullptr);
+
+    auto* access_note = instrument_label(access_panel,
+        "One authoritative PIN service protects both the LVGL console and Web UI. PINs are stored only as a salted yescrypt hash. LAN Web access uses HTTP and has no transport encryption.",
+        24, 318, &ac_font_12, COLOR_SECONDARY_TEXT);
+    lv_obj_set_width(access_note, 884);
+    lv_label_set_long_mode(access_note, LV_LABEL_LONG_WRAP);
+
+    // NETWORK
+    auto* network_panel = instrument_panel(view->system_container, 16, 456, 932, 440,
+                                           "NETWORK / NETWORKMANAGER");
+    view->sys_network_nm = instrument_label(network_panel, "NETWORKMANAGER: CHECKING...",
+                                            24, 52, &ac_font_14, COLOR_CYAN);
+    view->sys_network_connection = instrument_label(network_panel, "CONNECTION: -",
+                                                    24, 82, &ac_font_12, COLOR_TEXT);
+    lv_obj_set_width(view->sys_network_connection, 884);
+    view->sys_network_ssid = instrument_label(network_panel, "WI-FI SSID: -",
+                                              24, 110, &ac_font_12, COLOR_TEXT);
+    view->sys_network_signal = instrument_label(network_panel, "WI-FI SIGNAL: -",
+                                                24, 138, &ac_font_12, COLOR_TEXT);
+    view->sys_network_ipv4 = instrument_label(network_panel, "IPV4: -",
+                                              24, 166, &ac_font_12, COLOR_TEXT);
+    view->sys_network_device = instrument_label(network_panel, "INTERFACE: -",
+                                                24, 194, &ac_font_12, COLOR_TEXT);
+    lv_obj_set_width(view->sys_network_device, 884);
+
+    view->sys_network_note = instrument_label(network_panel,
+        "Querying live NetworkManager state...", 24, 230, &ac_font_12, COLOR_SECONDARY_TEXT);
+    lv_obj_set_width(view->sys_network_note, 884);
+    lv_label_set_long_mode(view->sys_network_note, LV_LABEL_LONG_WRAP);
+
+    view->sys_scan_btn = make_system_button(network_panel, "SCAN WI-FI", 24, 330, 420, 58,
+                                            COLOR_SELECTED_BORDER);
+    lv_obj_add_event_cb(view->sys_scan_btn, [](lv_event_t*) {
+        show_wifi_scan_modal();
+    }, LV_EVENT_CLICKED, nullptr);
+
+    auto* network_refresh = make_system_button(network_panel, "REFRESH NETWORK", 488, 330, 420, 58,
+                                               COLOR_STANDARD_BORDER);
+    lv_obj_add_event_cb(network_refresh, [](lv_event_t*) {
+        if (s_active_system_view) {
+            refresh_system_network_controls(s_active_system_view, true);
+            refresh_system_web_controls(s_active_system_view);
+        }
+    }, LV_EVENT_CLICKED, nullptr);
+
+    // WEB UI ACCESS
+    auto* web_panel = instrument_panel(view->system_container, 956, 456, 932, 440,
+                                       "WEB UI ACCESS / RUNTIME ADDRESS");
+    instrument_label(web_panel, "ACTUAL LISTENER URL", 24, 52, &ac_font_12, COLOR_TEXT2);
+    view->sys_web_url = instrument_label(web_panel, "http://127.0.0.1:8888/",
+                                         24, 82, &ac_font_28, COLOR_CYAN);
+    lv_obj_set_width(view->sys_web_url, 884);
+    lv_label_set_long_mode(view->sys_web_url, LV_LABEL_LONG_DOT);
+
+    view->sys_web_mode = instrument_label(web_panel, "LOCALHOST ONLY",
+                                          24, 130, &ac_font_16, COLOR_SECONDARY_TEXT);
+    view->sys_web_bind = instrument_label(web_panel, "BIND 127.0.0.1:8888  /  SCHEME http  /  TRANSPORT HTTP - NO TLS",
+                                          24, 164, &ac_font_12, COLOR_TEXT);
+    lv_obj_set_width(view->sys_web_bind, 884);
+    view->sys_web_note = instrument_label(web_panel,
+        "HTTP provides no transport encryption. Enable LAN access only on a trusted network and share the address and PIN only with authorized operators.",
+        24, 204, &ac_font_12, COLOR_SECONDARY_TEXT);
+    lv_obj_set_width(view->sys_web_note, 884);
+    lv_label_set_long_mode(view->sys_web_note, LV_LABEL_LONG_WRAP);
+
+    auto* web_hint = instrument_label(web_panel,
+        "A QR code for this exact runtime URL is generated in the Web UI Access panel.",
+        24, 322, &ac_font_12, COLOR_SECONDARY_TEXT);
+    lv_obj_set_width(web_hint, 884);
+    lv_label_set_long_mode(web_hint, LV_LABEL_LONG_WRAP);
+
+    refresh_system_access_controls(view);
+    refresh_system_power_controls(view);
+    refresh_system_network_controls(view, true);
+    refresh_system_web_controls(view);
+
     // Initial sync
     sync_theme_editor_controls(view);
     update_system_mode_view(view);
@@ -1289,6 +2201,23 @@ lv_obj_t* system_screen_create(void) {
             s_system_mode = 1;
             v->active_mode = 1;
             update_system_mode_view(v);
+        }
+    }, LV_EVENT_CLICKED, view);
+
+    lv_obj_add_event_cb(view->mode_system_btn, [](lv_event_t* e) {
+        auto* v = static_cast<SystemScreenView*>(lv_event_get_user_data(e));
+        if (v) {
+            s_system_mode = 2;
+            v->active_mode = 2;
+            v->last_security_tick = 0;
+            v->last_power_tick = 0;
+            v->last_network_tick = 0;
+            v->last_web_tick = 0;
+            update_system_mode_view(v);
+            refresh_system_access_controls(v);
+            refresh_system_power_controls(v);
+            refresh_system_network_controls(v, true);
+            refresh_system_web_controls(v);
         }
     }, LV_EVENT_CLICKED, view);
 

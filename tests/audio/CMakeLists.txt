@@ -64,6 +64,12 @@ add_test(NAME AfsCoreTests COMMAND test_afs)
 add_test(NAME AlignmentCoreTests COMMAND test_alignment)
 add_test(NAME ReverbTemplateTests COMMAND test_reverb_templates)
 
+add_executable(test_security_system test_security_system.cpp)
+target_include_directories(test_security_system PRIVATE ../../src)
+target_link_libraries(test_security_system PRIVATE prismix_system Threads::Threads)
+target_compile_features(test_security_system PRIVATE cxx_std_20)
+add_test(NAME SecuritySystemAuthorityTests COMMAND test_security_system)
+
 if(WIN32)
     add_executable(test_wasapi test_wasapi.cpp)
     target_link_libraries(test_wasapi PRIVATE audiocore)
@@ -165,10 +171,12 @@ set_tests_properties(PatchStorageCatalogAndInstallTests PROPERTIES WORKING_DIREC
 add_executable(test_web_control
     test_web_control.cpp
     ../../src/model/mixer_state.cpp
+    ../../src/model/mixer_scene.cpp
     ../../src/model/plugin_model.cpp
     ../../src/model/routing_state.cpp
     ../../src/dsp/geq_model.cpp
     ../../src/ui/ui_audio_bridge.cpp
+    ../../src/ui/theme/theme_model.cpp
     ../../src/backend/mock_audio_backend.cpp
     ../../src/dsp/eq_model.cpp
     ../../src/dsp/compressor_model.cpp
@@ -176,7 +184,7 @@ add_executable(test_web_control
     ../../src/dsp/analyzer_model.cpp
     ../../src/model/audio_setup_config.cpp)
 target_include_directories(test_web_control PRIVATE ../../src)
-target_link_libraries(test_web_control PRIVATE prismix_web_service prismix_plugin_host audiocore_ui_service audiocore ${CMAKE_DL_LIBS})
+target_link_libraries(test_web_control PRIVATE prismix_web_service prismix_patchstorage prismix_plugin_host audiocore_ui_service audiocore ZLIB::ZLIB ${CMAKE_DL_LIBS})
 if(WIN32)
     target_link_libraries(test_web_control PRIVATE ws2_32)
 endif()

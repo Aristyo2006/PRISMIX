@@ -19,6 +19,7 @@ public:
     void bump_state_version();
 
     std::string get_state_json(bool include_meters = true) const;
+    std::string get_telemetry_json() const;
     std::string get_catalog_json() const;
 
     // Command execution
@@ -45,4 +46,3 @@ private:
 };
 
 } // namespace prismix::web
-

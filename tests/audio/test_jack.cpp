@@ -138,6 +138,25 @@ void test_live_jack_server_if_running() {
     std::cout << "  PASS" << std::endl;
 }
 
+void test_structured_diagnostics_and_lifecycle() {
+    std::cout << "[TEST] JackBackend structured error diagnostics & lifecycle safety..." << std::endl;
+    audiocore::JackBackend backend;
+
+    // Test with a non-existent device to verify structured diagnostic reporting
+    backend.setPlaybackDevice("hw:99");
+    backend.setCaptureDevice("hw:99");
+
+    bool initialized = backend.initialize(48000.0, 128, 2);
+    if (!initialized) {
+        std::string err = backend.getLastErrorMessage();
+        assert(!err.empty());
+        assert(err.find("JACK") != std::string::npos);
+        std::cout << "  Diagnostic heading: " << err.substr(0, err.find('\n')) << std::endl;
+    }
+    assert(!backend.isRunning());
+    std::cout << "  PASS" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "AUDIO CORE: JackBackend Unit Tests" << std::endl;
@@ -146,6 +165,7 @@ int main() {
     test_initial_state();
     test_simulated_process_callback();
     test_device_enumeration();
+    test_structured_diagnostics_and_lifecycle();
     test_live_jack_server_if_running();
 
     std::cout << "========================================" << std::endl;

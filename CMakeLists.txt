@@ -54,6 +54,11 @@ target_include_directories(lvgl PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/config")
 # Find ZLIB for archive decompression and validation
 find_package(ZLIB REQUIRED)
 
+# PIN hashing uses libxcrypt's memory-hard yescrypt through the platform's
+# crypt(3) implementation. No home-grown cryptography is used.
+pkg_check_modules(XCRYPT REQUIRED IMPORTED_TARGET libxcrypt)
+find_package(Threads REQUIRED)
+
 # Glob sources (app, ui, model, backend, dsp)
 file(GLOB_RECURSE AUDIOCORE_SOURCES CONFIGURE_DEPENDS
     "src/*.cpp"
@@ -62,6 +67,8 @@ file(GLOB_RECURSE AUDIOCORE_SOURCES CONFIGURE_DEPENDS
 list(FILTER AUDIOCORE_SOURCES EXCLUDE REGEX "/src/service/audio_service\\.cpp$")
 list(FILTER AUDIOCORE_SOURCES EXCLUDE REGEX "/src/service/patchstorage/.*\\.cpp$")
 list(FILTER AUDIOCORE_SOURCES EXCLUDE REGEX "/src/service/web/.*\\.cpp$")
+list(FILTER AUDIOCORE_SOURCES EXCLUDE REGEX "/src/service/security/.*\\.cpp$")
+list(FILTER AUDIOCORE_SOURCES EXCLUDE REGEX "/src/service/system/.*\\.cpp$")
 list(FILTER AUDIOCORE_SOURCES EXCLUDE REGEX "/src/dsp/lv2/.*\\.cpp$")
 list(FILTER AUDIOCORE_SOURCES EXCLUDE REGEX "/src/dsp/nam/.*\\.cpp$")
 list(FILTER AUDIOCORE_SOURCES EXCLUDE REGEX "/src/model/pedalboard_preset\\.cpp$")
@@ -124,19 +131,33 @@ target_include_directories(audiocore_ui_service PUBLIC "src")
 target_link_libraries(audiocore_ui_service PUBLIC audiocore prismix_plugin_host prismix_patchstorage ${CMAKE_DL_LIBS})
 target_compile_features(audiocore_ui_service PUBLIC cxx_std_20)
 
+add_library(prismix_security STATIC
+    src/service/security/security_service.cpp
+)
+target_include_directories(prismix_security PUBLIC "src")
+target_link_libraries(prismix_security PUBLIC PkgConfig::XCRYPT Threads::Threads)
+target_compile_features(prismix_security PUBLIC cxx_std_20)
+
+add_library(prismix_system STATIC
+    src/service/system/system_service.cpp
+)
+target_include_directories(prismix_system PUBLIC "src")
+target_link_libraries(prismix_system PUBLIC prismix_security Threads::Threads)
+target_compile_features(prismix_system PUBLIC cxx_std_20)
+
 add_library(prismix_web_service STATIC
     src/service/web/web_control_bridge.cpp
     src/service/web/web_server.cpp
     src/service/web/web_assets.cpp
 )
 target_include_directories(prismix_web_service PUBLIC "src")
-target_link_libraries(prismix_web_service PUBLIC audiocore prismix_plugin_host audiocore_ui_service ${CMAKE_DL_LIBS})
+target_link_libraries(prismix_web_service PUBLIC audiocore prismix_plugin_host prismix_patchstorage audiocore_ui_service prismix_security prismix_system ZLIB::ZLIB ${CMAKE_DL_LIBS})
 if(WIN32)
     target_link_libraries(prismix_web_service PUBLIC ws2_32)
 endif()
 target_compile_features(prismix_web_service PUBLIC cxx_std_20)
 
-target_link_libraries(AudioCore PRIVATE audiocore_ui_service prismix_plugin_host prismix_patchstorage prismix_web_service ZLIB::ZLIB ${CMAKE_DL_LIBS})
+target_link_libraries(AudioCore PRIVATE audiocore_ui_service prismix_plugin_host prismix_patchstorage prismix_web_service prismix_security prismix_system ZLIB::ZLIB ${CMAKE_DL_LIBS})
 if(WIN32)
     target_link_libraries(AudioCore PRIVATE ws2_32)
 endif()
