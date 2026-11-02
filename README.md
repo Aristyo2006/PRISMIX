@@ -1,27 +1,12 @@
-# PRISMIX — Canary Branch 🧪
+# PRISMIX
 
-> **⚠️ DEVELOPMENT & EXPERIMENTAL CHANNEL (`Canary`)**
->
-> You are viewing the **Canary** branch of **PRISMIX (`AudioCore`)**. This branch is strictly for active development, bleeding-edge DSP/UI prototyping, backend audio routing experiments, and continuous QA testing.
-> - **Stability**: Features on `Canary` may be incomplete, undergoing active refactoring, or subject to breaking changes without notice.
-> - **Production / Stable Use**: Switch to the [`main`](../../tree/main) branch for stable builds.
+> **High-Performance Digital Audio Mixing Console & Live DSP Engine**
+
+PRISMIX (`AudioCore`) is a modular digital mixing console and live DSP workstation built in **C++20** (with a standalone **C++17** core DSP & hardware audio library) and powered by a hardware-grade **LVGL 9** user interface over **SDL2**. Designed for live performance, studio tracking, and guitar/instrument rigs, PRISMIX combines realtime native audio processing, flexible multi-backend I/O, native LV2 & NAM Lite neural modeling, PatchStorage catalog discovery, PIN-secured Web remote control, and an offline/live DSP Test Bench.
 
 ---
 
-## Canary Channel Overview
-
-PRISMIX (`AudioCore`) is a modular digital mixing console and live DSP workstation built in **C++20** (with a standalone **C++17** core DSP & hardware audio library) and powered by a hardware-grade **LVGL 9** user interface over **SDL2**.
-
-| Channel Property | Details |
-|---|---|
-| **Branch** | `Canary` (Development / Pre-Release) |
-| **Target Audience** | Core developers, DSP engineers, and QA testers |
-| **Build Recommended** | `Debug` or `RelWithDebInfo` with CTest & `--qa-test` verification |
-| **Web Remote UI** | Full 7-View Industrial Browser Console (`http://127.0.0.1:8888`) |
-
----
-
-## Active Subsystems & Features
+## Highlights & Features
 
 ### 🎛️ Hardware-Grade Live Mixing Console
 - **Scalable Channel & Bus Architecture**: Dynamic input strip allocation (`0` to `32` channels, Mono or Stereo) plus `4` stereo AUX buses and a dedicated Master L/R bus with scene persistence.
@@ -71,15 +56,10 @@ PRISMIX (`AudioCore`) is a modular digital mixing console and live DSP workstati
 
 ---
 
-## Developer Quickstart (`Canary`)
-
-### Clone & Checkout Canary
-```bash
-git clone -b Canary https://github.com/Aristyo2006/PRISMIX.git
-cd PRISMIX
-```
+## Getting Started
 
 ### Prerequisites
+
 - **C++ Compiler**: Clang 14+, GCC 12+, or MSVC 2022+ (C++20 required for `AudioCore` console; C++17 for `audiocore` engine library)
 - **CMake**: Version 3.20 or newer
 - **SDL2**: Development headers and runtime libraries (automatically fetched on Windows/MSVC)
@@ -95,12 +75,12 @@ sudo apt install build-essential cmake pkg-config libsdl2-dev zlib1g-dev libcryp
 
 ---
 
-### Building & Debugging
+### Building PRISMIX
 
-#### Linux / macOS (Debug / Development Build)
+#### Linux / macOS
 ```bash
-# Configure with Debug symbols for Canary testing
-cmake -B build-linux -DCMAKE_BUILD_TYPE=Debug
+# Configure build
+cmake -B build-linux -DCMAKE_BUILD_TYPE=Release
 
 # Compile all targets (AudioCore, prismix symlink, dsp_test_bench, prismix_overdrive, and tests)
 cmake --build build-linux -j$(nproc)
@@ -109,15 +89,15 @@ cmake --build build-linux -j$(nproc)
 #### Windows (PowerShell / Visual Studio)
 ```powershell
 # Configure build
-cmake -B build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 
-# Compile Debug or Release
-cmake --build build --config Debug
+# Compile
+cmake --build build --config Release
 ```
 
 ---
 
-### Running & Verification
+### Running PRISMIX
 
 ```bash
 # Launch the mixer console (or ./build-linux/prismix on Unix)
@@ -143,18 +123,30 @@ cmake --build build --config Debug
 | `--screenshot-tab <0..6>` | Navigate to a specific console tab (`0` = Mixer .. `6` = System) for screenshot capture |
 | `--dump-screens` | Render and capture verification screenshots across all console tabs and modals |
 
-#### DSP Test Bench & Verification Suites
-Before merging changes from `Canary` into `main`, verify that all unit tests, DSP correctness checks, and UI stress tests pass:
+#### DSP Test Bench Command-Line Options (`dsp_test_bench`)
+```bash
+# Run full self-test, 22-point DSP correctness suite, and pipeline benchmark
+./build-linux/tools/dsp_test_bench/dsp_test_bench --run-all
+
+# Launch the desktop DSP Test Bench GUI (Windows)
+./build/tools/dsp_test_bench/Release/dsp_test_bench.exe --gui
+
+# View all profiling, FX self-test, WASAPI device/loopback, and export flags
+./build-linux/tools/dsp_test_bench/dsp_test_bench --help
+```
+
+---
+
+### Running the Test Suite
+
+PRISMIX includes CTest unit and integration suites covering core DSP nodes, dynamics & gate telemetry, reverb templates & pre-delay, sample-rate conversion, RTA spectrum analysis, LV2 & NAM hosting, PatchStorage installation, mixer scene & theme persistence, PIN/session security & system authority, Web control bridge APIs, and WASAPI/JACK backends.
 
 ```bash
-# 1. Run all registered CTest unit & integration suites
+# Run all registered CTest suites
 ctest --test-dir build-linux --output-on-failure
 
-# 2. Run the complete LVGL UI & Engine QA stress suite
+# Run the complete LVGL UI & Engine QA stress suite
 ./build-linux/AudioCore --qa-test
-
-# 3. Run the DSP Test Bench self-test, 22-point correctness suite, and benchmark
-./build-linux/tools/dsp_test_bench/dsp_test_bench --run-all
 ```
 
 ---

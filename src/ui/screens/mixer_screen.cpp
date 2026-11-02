@@ -1,6 +1,7 @@
 #include "mixer_screen.h"
 #include "../theme/theme.h"
 #include "../widgets/instrument.h"
+#include "../assets/rack_textures.h"
 #include "../../model/mixer_state.h"
 #include "../../model/audio_setup_config.h"
 #include "../../model/routing_state.h"
@@ -20,20 +21,41 @@ constexpr int STRIP_HEIGHT = 914;
 
 struct StripUI {
     int index; // -1 for master, 0..N-1 for input channels
-    lv_obj_t* panel;
-    lv_obj_t* title_label;
-    lv_obj_t* input_label;
-    lv_obj_t* clip_flag;
-    lv_obj_t* fader_obj;
-    lv_obj_t* fader_label;
-    lv_obj_t* select_btn;
-    lv_obj_t* ren_btn;
-    lv_obj_t* del_btn;
-    ChannelState* state;
+    lv_obj_t* panel = nullptr;
+    lv_obj_t* sec_label = nullptr;
+    lv_obj_t* title_label = nullptr;
+    lv_obj_t* input_label = nullptr;
+    lv_obj_t* clip_flag = nullptr;
+    lv_obj_t* fader_obj = nullptr;
+    lv_obj_t* fader_label = nullptr;
+    lv_obj_t* select_btn = nullptr;
+    lv_obj_t* ren_btn = nullptr;
+    lv_obj_t* del_btn = nullptr;
+
+    // Meter bridge
+    lv_obj_t* gr_hdr = nullptr;
+    lv_obj_t* peak_hdr = nullptr;
+    lv_obj_t* gr_meter = nullptr;
+    lv_obj_t* meter_l = nullptr;       // Mono level meter or Stereo L meter
+    lv_obj_t* meter_r = nullptr;       // Stereo R meter (nullptr when mono)
+    lv_obj_t* gr_ftr = nullptr;
+    lv_obj_t* meter_l_ftr = nullptr;   // "LEVEL" when mono, "L" when stereo
+    lv_obj_t* meter_r_ftr = nullptr;   // nullptr when mono, "R" when stereo
+    lv_obj_t* master_meter = nullptr;  // Unified stereo meter with center scale (Master only)
+
+    // Controls
+    lv_obj_t* gain_knob = nullptr;
+    lv_obj_t* fmt_badge = nullptr;
+    lv_obj_t* limiter_btn = nullptr;
+    lv_obj_t* limiter_badge = nullptr;
+
+    ChannelState* state = nullptr;
+    ChannelFormat current_format = ChannelFormat::Mono;
 };
 
 lv_obj_t* g_screen = nullptr;
 lv_obj_t* g_scroll_container = nullptr;
+lv_obj_t* g_empty_container = nullptr;
 lv_obj_t* g_add_card = nullptr;
 lv_obj_t* g_add_label = nullptr;
 lv_obj_t* g_empty_hint = nullptr;
@@ -45,13 +67,25 @@ void update_strip_visual_selection(StripUI& s, bool is_selected);
 void select_channel(int index);
 void show_rename_modal(int index);
 void show_delete_modal(int index);
+void show_extension_info_modal(const char* title_text, const char* body_text);
 void add_channel();
 void show_channel_setup_modal(int channelId, bool createNew);
 void create_channel();
 void delete_channel(int index);
 StripUI createChannelStrip(int index);
+void updateChannelStrip(int index);
+void syncChannelMeterFormat(StripUI& s);
 void reposition_add_card();
 StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, bool is_master);
+
+void sync_selection_visuals(void) {
+    if (g_screen != nullptr) {
+        for (auto& s : g_input_strips) {
+            update_strip_visual_selection(s, s.index == g_mixer_state.selected_channel);
+        }
+        update_strip_visual_selection(g_master_strip, g_mixer_state.selected_channel == -1);
+    }
+}
 
 void select_channel(int index) {
     if (index < -1 || index >= (int)g_mixer_state.channels.size()) index = -1;
@@ -63,32 +97,24 @@ void select_channel(int index) {
     }
     g_mixer_state.master.select = (index == -1);
 
-    for (auto& s : g_input_strips) {
-        update_strip_visual_selection(s, s.index == index);
-    }
-    update_strip_visual_selection(g_master_strip, index == -1);
+    sync_selection_visuals();
 
     ui_sync_all_screens();
 }
 
 void update_strip_visual_selection(StripUI& s, bool is_selected) {
     if (!s.panel) return;
-    lv_obj_set_style_border_color(s.panel, is_selected ? COLOR_CYAN : COLOR_EDGE, 0);
-    lv_obj_set_style_border_width(s.panel, is_selected ? 2 : 1, 0);
-    lv_obj_set_style_bg_color(s.panel, is_selected ? lv_color_hex(0x1C2227) : COLOR_PANEL, 0);
+    ui::rack_skin::apply_channel_strip_panel(s.panel, is_selected);
 
     if (s.title_label) {
-        lv_obj_set_style_text_color(s.title_label, (s.index == -1) ? COLOR_CYAN : (is_selected ? COLOR_CYAN : COLOR_TEXT), 0);
+        lv_obj_set_style_text_color(s.title_label, is_selected ? COLOR_TEXT : COLOR_SILVER, 0);
     }
 
     if (s.select_btn) {
-        lv_obj_set_style_bg_opa(s.select_btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(s.select_btn, is_selected ? COLOR_CYAN : COLOR_CONTROL, 0);
-        lv_obj_set_style_border_color(s.select_btn, is_selected ? COLOR_CYAN : COLOR_EDGE, 0);
-        lv_obj_set_style_border_width(s.select_btn, is_selected ? 2 : 1, 0);
+        ui::rack_skin::apply_hardware_button(s.select_btn, is_selected, COLOR_SELECTED_BORDER, COLOR_RAISED_PANEL, COLOR_CONTROL);
         lv_obj_t* label = lv_obj_get_child(s.select_btn, 0);
         if (label) {
-            lv_obj_set_style_text_color(label, is_selected ? lv_color_hex(0x0C1014) : COLOR_TEXT2, 0);
+            lv_obj_set_style_text_color(label, is_selected ? COLOR_PRIMARY_TEXT : COLOR_SECONDARY_TEXT, 0);
         }
     }
 }
@@ -96,6 +122,62 @@ void update_strip_visual_selection(StripUI& s, bool is_selected) {
 
 
 static lv_obj_t* g_active_modal = nullptr;
+
+void show_extension_info_modal(const char* title_text, const char* body_text) {
+    if (g_active_modal) {
+        lv_obj_delete(g_active_modal);
+        g_active_modal = nullptr;
+    }
+    auto* backdrop = lv_obj_create(lv_layer_top());
+    g_active_modal = backdrop;
+    lv_obj_set_size(backdrop, 1920, 1080);
+    lv_obj_align(backdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(backdrop, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(backdrop, 0, 0);
+
+    auto* dialog = lv_obj_create(backdrop);
+    lv_obj_set_size(dialog, 620, 320);
+    lv_obj_align(dialog, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
+    ui::rack_skin::apply_chassis_panel(dialog, COLOR_ACCENT);
+    ui::rack_skin::add_faceplate_corner_screws(dialog, 620, 320, 6);
+    lv_obj_set_style_pad_all(dialog, 20, 0);
+
+    auto* title = lv_label_create(dialog);
+    lv_label_set_text(title, title_text);
+    lv_obj_set_pos(title, 8, 8);
+    lv_obj_set_style_text_font(title, &ac_font_16, 0);
+    lv_obj_set_style_text_color(title, COLOR_TEXT, 0);
+
+    auto* desc = lv_label_create(dialog);
+    lv_label_set_text(desc, body_text);
+    lv_obj_set_pos(desc, 8, 48);
+    lv_obj_set_width(desc, 564);
+    lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(desc, &ac_font_12, 0);
+    lv_obj_set_style_text_color(desc, COLOR_SILVER, 0);
+
+    auto* close_btn = lv_button_create(dialog);
+    lv_obj_set_size(close_btn, 130, 42);
+    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+    ui::rack_skin::apply_hardware_button(close_btn, false, COLOR_SELECTED_BORDER, COLOR_RAISED_PANEL, COLOR_CONTROL);
+    auto* close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, "DISMISS");
+    lv_obj_center(close_lbl);
+    lv_obj_set_style_text_font(close_lbl, &ac_font_14, 0);
+    lv_obj_set_style_text_color(close_lbl, COLOR_SILVER, 0);
+    lv_obj_add_event_cb(close_btn, [](lv_event_t* e) {
+        auto* bd = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+        if (bd) lv_obj_delete(bd);
+        g_active_modal = nullptr;
+    }, LV_EVENT_CLICKED, backdrop);
+
+    lv_obj_add_event_cb(backdrop, [](lv_event_t*) {
+        g_active_modal = nullptr;
+    }, LV_EVENT_DELETE, nullptr);
+}
 
 void show_rename_modal(int index) {
     if (index < 0 || index >= (int)g_mixer_state.channels.size()) return;
@@ -120,11 +202,8 @@ void show_rename_modal(int index) {
     lv_obj_set_size(dialog, 520, 210);
     lv_obj_align(dialog, LV_ALIGN_CENTER, 0, -140);
     lv_obj_remove_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x1A1F24), 0);
-    lv_obj_set_style_bg_opa(dialog, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(dialog, COLOR_CYAN, 0);
-    lv_obj_set_style_border_width(dialog, 2, 0);
-    lv_obj_set_style_radius(dialog, 4, 0);
+    ui::rack_skin::apply_chassis_panel(dialog, COLOR_ACCENT);
+    ui::rack_skin::add_faceplate_corner_screws(dialog, 520, 210, 6);
     lv_obj_set_style_pad_all(dialog, 16, 0);
 
     // Title
@@ -219,11 +298,7 @@ void show_rename_modal(int index) {
     auto* cancel_btn = lv_button_create(dialog);
     lv_obj_set_size(cancel_btn, 110, 40);
     lv_obj_set_pos(cancel_btn, 246, 126);
-    lv_obj_set_style_radius(cancel_btn, 2, 0);
-    lv_obj_set_style_bg_color(cancel_btn, COLOR_CONTROL, 0);
-    lv_obj_set_style_bg_opa(cancel_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(cancel_btn, COLOR_EDGE, 0);
-    lv_obj_set_style_border_width(cancel_btn, 1, 0);
+    ui::rack_skin::apply_hardware_button(cancel_btn, false, COLOR_EDGE, COLOR_CONTROL, lv_color_hex(0x181D23));
     auto* cancel_lbl = lv_label_create(cancel_btn);
     lv_label_set_text(cancel_lbl, "CANCEL");
     lv_obj_center(cancel_lbl);
@@ -240,16 +315,12 @@ void show_rename_modal(int index) {
     auto* apply_btn = lv_button_create(dialog);
     lv_obj_set_size(apply_btn, 110, 40);
     lv_obj_set_pos(apply_btn, 370, 126);
-    lv_obj_set_style_radius(apply_btn, 2, 0);
-    lv_obj_set_style_bg_color(apply_btn, COLOR_CYAN, 0);
-    lv_obj_set_style_bg_opa(apply_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(apply_btn, COLOR_TEXT, 0);
-    lv_obj_set_style_border_width(apply_btn, 1, 0);
+    ui::rack_skin::apply_hardware_button(apply_btn, false, COLOR_SELECTED_BORDER, COLOR_RAISED_PANEL, COLOR_CONTROL);
     auto* apply_lbl = lv_label_create(apply_btn);
     lv_label_set_text(apply_lbl, "APPLY");
     lv_obj_center(apply_lbl);
     lv_obj_set_style_text_font(apply_lbl, &ac_font_14, 0);
-    lv_obj_set_style_text_color(apply_lbl, lv_color_hex(0x081014), 0);
+    lv_obj_set_style_text_color(apply_lbl, COLOR_SILVER, 0);
     lv_obj_add_event_cb(apply_btn, [](lv_event_t* e) {
         auto* c = static_cast<RenameContext*>(lv_event_get_user_data(e));
         auto fn = reinterpret_cast<void(*)(RenameContext*)>(lv_obj_get_user_data(static_cast<lv_obj_t*>(lv_event_get_target(e))));
@@ -304,10 +375,9 @@ void show_delete_modal(int index) {
     lv_obj_set_size(dialog, 460, 210);
     lv_obj_center(dialog);
     lv_obj_remove_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x1B1F24), 0);
-    lv_obj_set_style_border_color(dialog, lv_color_hex(0xA02828), 0);
-    lv_obj_set_style_border_width(dialog, 2, 0);
-    lv_obj_set_style_radius(dialog, 4, 0);
+    ui::rack_skin::apply_chassis_panel(dialog, COLOR_RED);
+    ui::rack_skin::add_faceplate_corner_screws(dialog, 460, 210, 6);
+    lv_obj_set_style_pad_all(dialog, 16, 0);
 
     auto* title = lv_label_create(dialog);
     lv_label_set_text(title, "DELETE CHANNEL");
@@ -335,8 +405,7 @@ void show_delete_modal(int index) {
     auto* cancel_btn = lv_button_create(dialog);
     lv_obj_set_size(cancel_btn, 110, 40);
     lv_obj_set_pos(cancel_btn, 190, 145);
-    lv_obj_set_style_bg_color(cancel_btn, COLOR_CONTROL, 0);
-    lv_obj_set_style_border_color(cancel_btn, COLOR_EDGE, 0);
+    ui::rack_skin::apply_hardware_button(cancel_btn, false, COLOR_EDGE, COLOR_CONTROL, lv_color_hex(0x181D23));
     auto* cancel_lbl = lv_label_create(cancel_btn);
     lv_label_set_text(cancel_lbl, "CANCEL");
     lv_obj_center(cancel_lbl);
@@ -354,13 +423,12 @@ void show_delete_modal(int index) {
     auto* del_btn = lv_button_create(dialog);
     lv_obj_set_size(del_btn, 110, 40);
     lv_obj_set_pos(del_btn, 316, 145);
-    lv_obj_set_style_bg_color(del_btn, lv_color_hex(0x8B1C1C), 0);
-    lv_obj_set_style_border_color(del_btn, COLOR_RED, 0);
+    ui::rack_skin::apply_hardware_button(del_btn, false, COLOR_RED, lv_color_hex(0x5A1818), lv_color_hex(0x3B1010));
     auto* del_lbl = lv_label_create(del_btn);
     lv_label_set_text(del_lbl, "DELETE");
     lv_obj_center(del_lbl);
     lv_obj_set_style_text_font(del_lbl, &ac_font_12, 0);
-    lv_obj_set_style_text_color(del_lbl, COLOR_TEXT, 0);
+    lv_obj_set_style_text_color(del_lbl, lv_color_hex(0xFCA5A5), 0);
     lv_obj_add_event_cb(del_btn, [](lv_event_t* e) {
         auto* c = static_cast<DeleteContext*>(lv_event_get_user_data(e));
         if (!c || c->closed) return;
@@ -373,17 +441,99 @@ void show_delete_modal(int index) {
 }
 
 void reposition_add_card() {
-    if (!g_add_card) return;
     const int count = (int)g_input_strips.size();
-    if (count == 0) {
-        const int width = 360;
-        const int height = 250;
-        lv_obj_set_size(g_add_card, width, height);
-        lv_obj_set_pos(g_add_card, (1686 - width) / 2, (STRIP_HEIGHT + 4 - height) / 2);
+    if (g_empty_container) {
+        if (count == 0) {
+            lv_obj_remove_flag(g_empty_container, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(g_empty_container, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (g_add_card) {
+        if (count == 0) {
+            lv_obj_add_flag(g_add_card, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(g_add_card, LV_OBJ_FLAG_HIDDEN);
+            const int x = 8 + count * (STRIP_WIDTH + STRIP_GAP);
+            lv_obj_set_size(g_add_card, 130, STRIP_HEIGHT);
+            lv_obj_set_pos(g_add_card, x, 0);
+        }
+    }
+}
+
+void syncChannelMeterFormat(StripUI& s) {
+    if (!s.state || !s.panel || s.index < 0) return;
+    if (s.current_format == s.state->format) return;
+
+    if (s.state->format == ChannelFormat::Mono) {
+        // Transition to Mono layout:
+        // Safely remove redundant Right channel meter & footer
+        if (s.meter_r) {
+            lv_obj_delete(s.meter_r);
+            s.meter_r = nullptr;
+        }
+        if (s.meter_r_ftr) {
+            lv_obj_delete(s.meter_r_ftr);
+            s.meter_r_ftr = nullptr;
+        }
+        // Reposition Compressor GR meter
+        if (s.gr_meter) {
+            lv_obj_set_pos(s.gr_meter, 20, 86);
+            lv_obj_set_size(s.gr_meter, 16, 142);
+        }
+        if (s.gr_hdr) lv_obj_set_pos(s.gr_hdr, 20, 70);
+        if (s.gr_ftr) lv_obj_set_pos(s.gr_ftr, 20, 232);
+
+        // Compact Single Left meter (24px width, not stretched!)
+        if (s.meter_l) {
+            lv_obj_set_pos(s.meter_l, 48, 86);
+            lv_obj_set_size(s.meter_l, 24, 142);
+            lv_obj_invalidate(s.meter_l);
+        }
+        if (s.meter_l_ftr) {
+            lv_obj_set_pos(s.meter_l_ftr, 42, 232);
+            lv_label_set_text(s.meter_l_ftr, "LEVEL");
+        }
+        if (s.peak_hdr) {
+            lv_obj_set_pos(s.peak_hdr, 48, 70);
+        }
+        if (s.sec_label) {
+            lv_label_set_text(s.sec_label, "MONO INPUT");
+        }
+        s.current_format = ChannelFormat::Mono;
     } else {
-        const int x = 8 + count * (STRIP_WIDTH + STRIP_GAP);
-        lv_obj_set_size(g_add_card, 130, STRIP_HEIGHT);
-        lv_obj_set_pos(g_add_card, x, 0);
+        // Transition to Stereo layout:
+        if (s.gr_meter) {
+            lv_obj_set_pos(s.gr_meter, 14, 86);
+            lv_obj_set_size(s.gr_meter, 16, 142);
+        }
+        if (s.gr_hdr) lv_obj_set_pos(s.gr_hdr, 14, 70);
+        if (s.gr_ftr) lv_obj_set_pos(s.gr_ftr, 14, 232);
+
+        // Compact Left meter (24px width)
+        if (s.meter_l) {
+            lv_obj_set_pos(s.meter_l, 36, 86);
+            lv_obj_set_size(s.meter_l, 24, 142);
+            lv_obj_invalidate(s.meter_l);
+        }
+        if (s.meter_l_ftr) {
+            lv_obj_set_pos(s.meter_l_ftr, 44, 232);
+            lv_label_set_text(s.meter_l_ftr, "L");
+        }
+        // Recreate Right meter if missing
+        if (!s.meter_r) {
+            s.meter_r = instrument_meter(s.panel, &s.state->peak_r, &s.state->clip, 64, 86, 24, 142, &s.state->peak_hold_r, &s.state->rms_r);
+        }
+        if (!s.meter_r_ftr) {
+            s.meter_r_ftr = instrument_label(s.panel, "R", 72, 232, &ac_font_12, COLOR_TEXT2);
+        }
+        if (s.peak_hdr) {
+            lv_obj_set_pos(s.peak_hdr, 46, 70);
+        }
+        if (s.sec_label) {
+            lv_label_set_text(s.sec_label, "STEREO INPUT");
+        }
+        s.current_format = ChannelFormat::Stereo;
     }
 }
 
@@ -391,6 +541,7 @@ void updateChannelStrip(int index) {
     if (index < 0 || index >= (int)g_input_strips.size()) return;
     auto& s = g_input_strips[index];
     s.state = &g_mixer_state.channels[index];
+    syncChannelMeterFormat(s);
     if (s.title_label) {
         char text[64];
         std::snprintf(text, sizeof(text), "CH %02d   %s", index + 1, s.state->name);
@@ -398,6 +549,11 @@ void updateChannelStrip(int index) {
     }
     if (s.input_label) {
         lv_label_set_text(s.input_label, s.state->input_label);
+    }
+    if (s.fmt_badge) {
+        const bool isSt = (s.state->format == ChannelFormat::Stereo);
+        lv_label_set_text(s.fmt_badge, isSt ? "STEREO" : "MONO");
+        lv_obj_set_style_text_color(s.fmt_badge, isSt ? COLOR_SILVER : COLOR_TEXT2, 0);
     }
     update_strip_visual_selection(s, index == g_mixer_state.selected_channel);
 }
@@ -521,19 +677,19 @@ void updateFormatSelectorButtons(ChannelSetupModal* view) {
     if (!view) return;
     const bool isMono = (view->format == ChannelFormat::Mono);
     if (view->formatMonoBtn) {
-        lv_obj_set_style_bg_color(view->formatMonoBtn, isMono ? lv_color_hex(0x20323C) : COLOR_CONTROL, 0);
-        lv_obj_set_style_border_color(view->formatMonoBtn, isMono ? COLOR_CYAN : COLOR_EDGE, 0);
+        lv_obj_set_style_bg_color(view->formatMonoBtn, isMono ? COLOR_RAISED_PANEL : COLOR_CONTROL, 0);
+        lv_obj_set_style_border_color(view->formatMonoBtn, isMono ? COLOR_SELECTED_BORDER : COLOR_STANDARD_BORDER, 0);
         lv_obj_set_style_border_width(view->formatMonoBtn, isMono ? 2 : 1, 0);
         if (lv_obj_get_child_count(view->formatMonoBtn) > 0) {
-            lv_obj_set_style_text_color(lv_obj_get_child(view->formatMonoBtn, 0), isMono ? COLOR_CYAN : COLOR_TEXT2, 0);
+            lv_obj_set_style_text_color(lv_obj_get_child(view->formatMonoBtn, 0), isMono ? COLOR_PRIMARY_TEXT : COLOR_SECONDARY_TEXT, 0);
         }
     }
     if (view->formatStereoBtn) {
-        lv_obj_set_style_bg_color(view->formatStereoBtn, !isMono ? lv_color_hex(0x20323C) : COLOR_CONTROL, 0);
-        lv_obj_set_style_border_color(view->formatStereoBtn, !isMono ? COLOR_CYAN : COLOR_EDGE, 0);
+        lv_obj_set_style_bg_color(view->formatStereoBtn, !isMono ? COLOR_RAISED_PANEL : COLOR_CONTROL, 0);
+        lv_obj_set_style_border_color(view->formatStereoBtn, !isMono ? COLOR_SELECTED_BORDER : COLOR_STANDARD_BORDER, 0);
         lv_obj_set_style_border_width(view->formatStereoBtn, !isMono ? 2 : 1, 0);
         if (lv_obj_get_child_count(view->formatStereoBtn) > 0) {
-            lv_obj_set_style_text_color(lv_obj_get_child(view->formatStereoBtn, 0), !isMono ? COLOR_CYAN : COLOR_TEXT2, 0);
+            lv_obj_set_style_text_color(lv_obj_get_child(view->formatStereoBtn, 0), !isMono ? COLOR_PRIMARY_TEXT : COLOR_SECONDARY_TEXT, 0);
         }
     }
 }
@@ -809,6 +965,7 @@ void show_channel_setup_modal(int channelId, bool createNew) {
     service.refreshDevices();
     auto* backdrop = lv_obj_create(lv_layer_top());
     view->backdrop = backdrop;
+    g_active_modal = backdrop;
     lv_obj_set_size(backdrop, 1920, 1080);
     lv_obj_center(backdrop);
     lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_SCROLLABLE);
@@ -819,11 +976,8 @@ void show_channel_setup_modal(int channelId, bool createNew) {
     lv_obj_set_size(dialog, 760, 670);
     lv_obj_center(dialog);
     lv_obj_remove_flag(dialog, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(dialog, lv_color_hex(0x161B20), 0);
-    lv_obj_set_style_bg_opa(dialog, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(dialog, COLOR_CYAN, 0);
-    lv_obj_set_style_border_width(dialog, 2, 0);
-    lv_obj_set_style_radius(dialog, 2, 0);
+    ui::rack_skin::apply_chassis_panel(dialog, COLOR_ACCENT);
+    ui::rack_skin::add_faceplate_corner_screws(dialog, 760, 670, 6);
     lv_obj_set_style_pad_all(dialog, 18, 0);
     instrument_label(dialog, createNew ? "ADD CHANNEL / SELECT FORMAT, INPUT & OUTPUT" : "CHANNEL PATCH / FORMAT, INPUT & OUTPUT", 16, 8,
                      &ac_font_16, COLOR_TEXT);
@@ -831,7 +985,7 @@ void show_channel_setup_modal(int channelId, bool createNew) {
                      &ac_font_12, COLOR_TEXT2);
 
     // Format selector row (MONO vs STEREO)
-    instrument_label(dialog, "CHANNEL FORMAT (MONO / STEREO)", 16, 62, &ac_font_12, COLOR_CYAN);
+    instrument_label(dialog, "CHANNEL FORMAT (MONO / STEREO)", 16, 62, &ac_font_12, COLOR_SILVER);
     view->formatMonoBtn = instrument_button(dialog, "MONO CHANNEL  (1 INPUT  /  PAN)", 16, 84, 336, 40, nullptr);
     view->formatStereoBtn = instrument_button(dialog, "STEREO CHANNEL  (2 INPUTS L/R  /  BALANCE)", 370, 84, 336, 40, nullptr);
     updateFormatSelectorButtons(view);
@@ -912,6 +1066,7 @@ void show_channel_setup_modal(int channelId, bool createNew) {
     lv_obj_add_event_cb(view->captureDevice, selectCaptureEndpoint, LV_EVENT_VALUE_CHANGED, view);
     lv_obj_add_event_cb(view->renderDevice, selectRenderEndpoint, LV_EVENT_VALUE_CHANGED, view);
     lv_obj_add_event_cb(backdrop, [](lv_event_t* event) {
+        g_active_modal = nullptr;
         auto* v = static_cast<ChannelSetupModal*>(lv_event_get_user_data(event));
         if (v) {
             if (v->refreshTimer) lv_timer_delete(v->refreshTimer);
@@ -976,9 +1131,18 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
     const char* header_title = is_master
         ? "STEREO MASTER"
         : (state->format == ChannelFormat::Stereo ? "STEREO INPUT" : "MONO INPUT");
-    auto* p = instrument_panel(parent, x, y, width, STRIP_HEIGHT, header_title);
+    auto* p = instrument_panel(parent, x, y, width, STRIP_HEIGHT, nullptr);
     s.panel = p;
     lv_obj_add_flag(p, LV_OBJ_FLAG_CLICKABLE);
+    ui::rack_skin::apply_channel_strip_panel(p, is_master ? (g_mixer_state.selected_channel == -1) : (g_mixer_state.selected_channel == index));
+    ui::rack_skin::create_rack_screw(p, 4, 4);
+    ui::rack_skin::create_rack_screw(p, width - 18, 4);
+    ui::rack_skin::create_rack_screw(p, 4, STRIP_HEIGHT - 18);
+    ui::rack_skin::create_rack_screw(p, width - 18, STRIP_HEIGHT - 18);
+
+    // Section title
+    auto* sec_lbl = instrument_label(p, header_title, 12, 8, &ac_font_12, COLOR_TEXT2);
+    s.sec_label = sec_lbl;
 
     // Click channel body / header to select
     lv_obj_add_event_cb(p, [](lv_event_t* e) {
@@ -994,7 +1158,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
     } else {
         std::snprintf(text, sizeof(text), "CH %02d   %s", index + 1, state->name);
     }
-    s.title_label = instrument_label(p, text, 8, 30, &ac_font_16, is_master ? COLOR_CYAN : COLOR_TEXT);
+    s.title_label = instrument_label(p, text, 8, 26, &ac_font_16, COLOR_TEXT);
     lv_obj_add_flag(s.title_label, LV_OBJ_FLAG_CLICKABLE);
 
     // Clicking channel name selects channel; double clicking name triggers rename
@@ -1015,7 +1179,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
     }
 
     // Clip indicator
-    s.clip_flag = instrument_label(p, state->clip ? "CLIP" : "OK", width - 46, 32, &ac_font_12, state->clip ? COLOR_RED : COLOR_GREEN);
+    s.clip_flag = instrument_label(p, state->clip ? "CLIP" : "OK", width - 46, 28, &ac_font_12, state->clip ? COLOR_RED : COLOR_GREEN);
     struct ClipBinding { bool* clip; lv_obj_t* label; lv_timer_t* timer; };
     auto* cb = new ClipBinding{&state->clip, s.clip_flag, nullptr};
     cb->timer = lv_timer_create([](lv_timer_t* t) {
@@ -1032,19 +1196,24 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
         }
     }, LV_EVENT_DELETE, cb);
 
-    // Input label
-    s.input_label = instrument_label(p, state->input_label, 8, 56, &ac_font_12, COLOR_TEXT2);
+    // Input label (clickable to open setup/patching dialog)
+    if (is_master) {
+        s.input_label = instrument_label(p, state->input_label, 8, 44, &ac_font_12, COLOR_SILVER);
+    } else {
+        s.input_label = instrument_label(p, state->input_label, 8, 48, &ac_font_12, COLOR_SILVER);
+        lv_obj_add_flag(s.input_label, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(s.input_label, [](lv_event_t* e) {
+            const int chId = (int)(intptr_t)lv_event_get_user_data(e);
+            if (chId > 0) mixer_screen_show_channel_setup(chId);
+        }, LV_EVENT_CLICKED, (void*)(intptr_t)state->id);
+    }
 
     // Action buttons on input channels (REN & DEL)
     if (!is_master) {
         s.ren_btn = lv_button_create(p);
-        lv_obj_set_pos(s.ren_btn, 108, 53);
+        lv_obj_set_pos(s.ren_btn, 108, 46);
         lv_obj_set_size(s.ren_btn, 40, 22);
-        lv_obj_set_style_radius(s.ren_btn, 2, 0);
-        lv_obj_set_style_bg_color(s.ren_btn, COLOR_CONTROL, 0);
-        lv_obj_set_style_border_color(s.ren_btn, COLOR_EDGE, 0);
-        lv_obj_set_style_border_width(s.ren_btn, 1, 0);
-        lv_obj_set_style_pad_all(s.ren_btn, 0, 0);
+        ui::rack_skin::apply_hardware_button(s.ren_btn, false, COLOR_EDGE, COLOR_CONTROL, lv_color_hex(0x181D23));
         auto* ren_lbl = lv_label_create(s.ren_btn);
         lv_label_set_text(ren_lbl, "REN");
         lv_obj_center(ren_lbl);
@@ -1056,13 +1225,9 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
         }, LV_EVENT_CLICKED, (void*)(intptr_t)index);
 
         s.del_btn = lv_button_create(p);
-        lv_obj_set_pos(s.del_btn, 152, 53);
+        lv_obj_set_pos(s.del_btn, 152, 46);
         lv_obj_set_size(s.del_btn, 40, 22);
-        lv_obj_set_style_radius(s.del_btn, 2, 0);
-        lv_obj_set_style_bg_color(s.del_btn, lv_color_hex(0x2E1616), 0);
-        lv_obj_set_style_border_color(s.del_btn, lv_color_hex(0x6A2828), 0);
-        lv_obj_set_style_border_width(s.del_btn, 1, 0);
-        lv_obj_set_style_pad_all(s.del_btn, 0, 0);
+        ui::rack_skin::apply_hardware_button(s.del_btn, false, lv_color_hex(0x7A2424), lv_color_hex(0x3B1515), lv_color_hex(0x281010));
         auto* del_lbl = lv_label_create(s.del_btn);
         lv_label_set_text(del_lbl, "DEL");
         lv_obj_center(del_lbl);
@@ -1075,18 +1240,50 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
     }
 
     // Meters section
-    instrument_label(p, "PEAK", 8, 91, &ac_font_12, COLOR_TEXT2);
-    instrument_meter(p, &state->peak_l, &state->clip, 44, 86, 25, 142, &state->peak_hold_l, &state->rms_l);
-    instrument_meter(p, &state->peak_r, &state->clip, 77, 86, 25, 142, &state->peak_hold_r, &state->rms_r);
-    instrument_label(p, "L", 49, 232, &ac_font_12, COLOR_TEXT2);
-    instrument_label(p, "R", 82, 232, &ac_font_12, COLOR_TEXT2);
-
-    // Gain dial
-    instrument_knob(p, "GAIN", &state->gain, 0.0f, 1.0f, 0.5f, "dB", 108, 88, 64);
-
     if (is_master) {
-        instrument_button(p, "LIMITER", 108, 190, 84, 28, &state->limiter_enabled);
-        auto* lim_lbl = instrument_label(p, "GR: 0.0dB", 108, 224, &ac_font_12, COLOR_YELLOW);
+        // Main Level Meter Area (Left Column: x=12..98, width=86)
+        s.master_meter = instrument_master_meter(
+            p,
+            &state->peak_l,
+            &state->peak_r,
+            &state->clip,
+            12, 64, 86, 190,
+            &state->peak_hold_l,
+            &state->peak_hold_r,
+            &state->rms_l,
+            &state->rms_r
+        );
+        s.meter_l = nullptr;
+        s.meter_r = nullptr;
+        s.meter_l_ftr = instrument_label(p, "L", 22, 258, &ac_font_12, COLOR_TEXT2);
+        s.meter_r_ftr = instrument_label(p, "R", 83, 258, &ac_font_12, COLOR_TEXT2);
+
+        // Master Controls Area (Right Column: x=111..195, width=84)
+        s.gain_knob = instrument_knob(p, "GAIN", &state->gain, 0.0f, 1.0f, 0.5f, "dB", 111, 66, 52);
+
+        // Limiter enable button (clearly separated from meter & knob)
+        s.limiter_btn = instrument_button(p, "LIMITER", 111, 160, 84, 24, &state->limiter_enabled);
+
+        // Limiter Reduction Section
+        auto* lim_red_lbl = instrument_label(p, "LIMITER GR", 111, 189, &ac_font_12, COLOR_TEXT2);
+        lv_obj_set_width(lim_red_lbl, 84);
+        lv_obj_set_style_text_align(lim_red_lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+        // Dedicated Horizontal Limiter Gain Reduction Meter Bar
+        s.gr_meter = instrument_limiter_gr_meter(p, &state->limiter_gr_db, &state->limiter_enabled, 111, 205, 84, 12);
+
+        // Digital Limiter status readout badge
+        auto* lim_lbl = instrument_label(p, "LIM BYP", 111, 223, &ac_font_12, COLOR_TEXT2);
+        s.limiter_badge = lim_lbl;
+        lv_obj_set_width(lim_lbl, 84);
+        lv_obj_set_style_text_align(lim_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_bg_color(lim_lbl, lv_color_hex(0x0B0E13), 0);
+        lv_obj_set_style_bg_opa(lim_lbl, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(lim_lbl, 1, 0);
+        lv_obj_set_style_border_color(lim_lbl, lv_color_hex(0x27303B), 0);
+        lv_obj_set_style_radius(lim_lbl, 2, 0);
+        lv_obj_set_style_pad_ver(lim_lbl, 1, 0);
+
         struct LimStripBinding { ChannelState* st; lv_obj_t* label; lv_timer_t* timer; };
         auto* lsb = new LimStripBinding{state, lim_lbl, nullptr};
         lsb->timer = lv_timer_create([](lv_timer_t* t) {
@@ -1108,17 +1305,59 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             }
         }, LV_EVENT_DELETE, lsb);
     } else {
-        auto* fmt_lbl = instrument_label(p, state->format == ChannelFormat::Stereo ? "FMT: STEREO" : "FMT: MONO",
-                                         108, 198, &ac_font_12,
-                                         state->format == ChannelFormat::Stereo ? COLOR_CYAN : COLOR_TEXT2);
-        struct FmtStripBinding { ChannelState* st; lv_obj_t* label; lv_timer_t* timer; };
-        auto* fsb = new FmtStripBinding{state, fmt_lbl, nullptr};
+        s.current_format = state->format;
+
+        if (state->format == ChannelFormat::Mono) {
+            // Mono Presentation: Compact single meter alongside Compressor GR meter
+            s.gr_hdr = instrument_label(p, "GR", 20, 70, &ac_font_12, COLOR_TEXT2);
+            s.gr_meter = instrument_gr_meter(p, &state->comp_gr, 20, 86, 16, 142, &state->comp_bypass, false);
+            s.gr_ftr = instrument_label(p, "GR", 20, 232, &ac_font_12, COLOR_TEXT2);
+
+            s.peak_hdr = instrument_label(p, "PEAK", 48, 70, &ac_font_12, COLOR_TEXT2);
+            s.meter_l = instrument_meter(p, &state->peak_l, &state->clip, 48, 86, 24, 142, &state->peak_hold_l, &state->rms_l);
+            s.meter_r = nullptr;
+            s.meter_l_ftr = instrument_label(p, "LEVEL", 42, 232, &ac_font_12, COLOR_TEXT2);
+            s.meter_r_ftr = nullptr;
+        } else {
+            // Stereo Presentation: Dual compact meters side-by-side alongside Compressor GR meter
+            s.gr_hdr = instrument_label(p, "GR", 14, 70, &ac_font_12, COLOR_TEXT2);
+            s.gr_meter = instrument_gr_meter(p, &state->comp_gr, 14, 86, 16, 142, &state->comp_bypass, false);
+            s.gr_ftr = instrument_label(p, "GR", 14, 232, &ac_font_12, COLOR_TEXT2);
+
+            s.peak_hdr = instrument_label(p, "PEAK", 46, 70, &ac_font_12, COLOR_TEXT2);
+            s.meter_l = instrument_meter(p, &state->peak_l, &state->clip, 36, 86, 24, 142, &state->peak_hold_l, &state->rms_l);
+            s.meter_r = instrument_meter(p, &state->peak_r, &state->clip, 64, 86, 24, 142, &state->peak_hold_r, &state->rms_r);
+            s.meter_l_ftr = instrument_label(p, "L", 44, 232, &ac_font_12, COLOR_TEXT2);
+            s.meter_r_ftr = instrument_label(p, "R", 72, 232, &ac_font_12, COLOR_TEXT2);
+        }
+
+        // Gain dial centered in the reclaimed control space (x=104)
+        s.gain_knob = instrument_knob(p, "GAIN", &state->gain, 0.0f, 1.0f, 0.5f, "dB", 104, 80, 64);
+
+        auto* fmt_lbl = instrument_label(p, state->format == ChannelFormat::Stereo ? "STEREO" : "MONO",
+                                         104, 202, &ac_font_12,
+                                         state->format == ChannelFormat::Stereo ? COLOR_SILVER : COLOR_TEXT2);
+        s.fmt_badge = fmt_lbl;
+        lv_obj_set_width(fmt_lbl, 84);
+        lv_obj_set_style_text_align(fmt_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_bg_color(fmt_lbl, lv_color_hex(0x0B0E13), 0);
+        lv_obj_set_style_bg_opa(fmt_lbl, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(fmt_lbl, 1, 0);
+        lv_obj_set_style_border_color(fmt_lbl, lv_color_hex(0x27303B), 0);
+        lv_obj_set_style_radius(fmt_lbl, 2, 0);
+        lv_obj_set_style_pad_ver(fmt_lbl, 2, 0);
+
+        struct FmtStripBinding { int index; ChannelState* st; lv_obj_t* label; lv_timer_t* timer; };
+        auto* fsb = new FmtStripBinding{index, state, fmt_lbl, nullptr};
         fsb->timer = lv_timer_create([](lv_timer_t* t) {
             auto* b = static_cast<FmtStripBinding*>(lv_timer_get_user_data(t));
             if (!b || !b->st || !b->label) return;
             const bool isSt = (b->st->format == ChannelFormat::Stereo);
-            lv_label_set_text(b->label, isSt ? "FMT: STEREO" : "FMT: MONO");
-            lv_obj_set_style_text_color(b->label, isSt ? COLOR_CYAN : COLOR_TEXT2, 0);
+            lv_label_set_text(b->label, isSt ? "STEREO" : "MONO");
+            lv_obj_set_style_text_color(b->label, isSt ? COLOR_SILVER : COLOR_TEXT2, 0);
+            if (b->index >= 0 && b->index < (int)g_input_strips.size()) {
+                syncChannelMeterFormat(g_input_strips[b->index]);
+            }
         }, 200, fsb);
         lv_obj_add_event_cb(fmt_lbl, [](lv_event_t* e) {
             auto* b = static_cast<FmtStripBinding*>(lv_event_get_user_data(e));
@@ -1131,7 +1370,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
 
     // Fader scale markings
     instrument_label(p, "+10", 10, 284, &ac_font_12, COLOR_TEXT2);
-    instrument_label(p, "0", 17, 338, &ac_font_12, COLOR_CYAN);
+    instrument_label(p, "0", 17, 338, &ac_font_12, COLOR_SILVER);
     instrument_label(p, "-6", 13, 402, &ac_font_12, COLOR_TEXT2);
     instrument_label(p, "-12", 10, 466, &ac_font_12, COLOR_TEXT2);
     instrument_label(p, "-24", 10, 532, &ac_font_12, COLOR_TEXT2);
@@ -1169,9 +1408,9 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             // 1. Recessed track slot
             lv_draw_rect_dsc_t track;
             lv_draw_rect_dsc_init(&track);
-            track.bg_color = lv_color_hex(0x0C0E10);
+            track.bg_color = lv_color_hex(0x0A0D10);
             track.bg_opa = LV_OPA_COVER;
-            track.border_color = lv_color_hex(0x252B30);
+            track.border_color = lv_color_hex(0x20262C);
             track.border_width = 1;
             track.radius = 1;
             lv_area_t tr{cx - 4, a.y1 + 4, cx + 4, a.y2 - 4};
@@ -1180,7 +1419,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             // Inner slot shadow
             lv_draw_line_dsc_t slot_sh;
             lv_draw_line_dsc_init(&slot_sh);
-            slot_sh.color = lv_color_hex(0x060708);
+            slot_sh.color = lv_color_hex(0x050709);
             slot_sh.width = 1;
             slot_sh.p1.x = cx - 3; slot_sh.p1.y = a.y1 + 5;
             slot_sh.p2.x = cx - 3; slot_sh.p2.y = a.y2 - 5;
@@ -1190,7 +1429,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             const int y_0db = a.y2 - (int)(0.86f * total_h);
             lv_draw_line_dsc_t ref_0db;
             lv_draw_line_dsc_init(&ref_0db);
-            ref_0db.color = COLOR_CYAN;
+            ref_0db.color = COLOR_SILVER;
             ref_0db.width = 2;
             ref_0db.p1.x = cx - 8; ref_0db.p1.y = y_0db;
             ref_0db.p2.x = cx + 8; ref_0db.p2.y = y_0db;
@@ -1203,7 +1442,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             if (cap_y < a.y2 - 6) {
                 lv_draw_rect_dsc_t act_slot;
                 lv_draw_rect_dsc_init(&act_slot);
-                act_slot.bg_color = lv_color_hex(0x133842);
+                act_slot.bg_color = lv_color_hex(0x1A2530);
                 act_slot.bg_opa = LV_OPA_COVER;
                 lv_area_t as{cx - 2, cap_y + 14, cx + 2, a.y2 - 5};
                 lv_draw_rect(layer, &act_slot, &as);
@@ -1213,7 +1452,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             // Bottom shadow
             lv_draw_rect_dsc_t sh;
             lv_draw_rect_dsc_init(&sh);
-            sh.bg_color = lv_color_hex(0x08090A);
+            sh.bg_color = lv_color_hex(0x06080A);
             sh.bg_opa = LV_OPA_60;
             lv_area_t sha{cx - 18, cap_y + 14, cx + 18, cap_y + 18};
             lv_draw_rect(layer, &sh, &sha);
@@ -1221,9 +1460,9 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             // Outer cap body
             lv_draw_rect_dsc_t cap;
             lv_draw_rect_dsc_init(&cap);
-            cap.bg_color = lv_color_hex(0x23282D);
+            cap.bg_color = lv_color_hex(0x22272D);
             cap.bg_opa = LV_OPA_COVER;
-            cap.border_color = lv_color_hex(0x3E4750);
+            cap.border_color = lv_color_hex(0x3C454E);
             cap.border_width = 1;
             cap.radius = 2;
             lv_area_t ca{cx - 20, cap_y - 15, cx + 20, cap_y + 15};
@@ -1232,7 +1471,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             // Top highlight bevel line
             lv_draw_line_dsc_t top_hi;
             lv_draw_line_dsc_init(&top_hi);
-            top_hi.color = lv_color_hex(0x56626E);
+            top_hi.color = lv_color_hex(0x525E6A);
             top_hi.width = 1;
             top_hi.p1.x = cx - 18; top_hi.p1.y = cap_y - 14;
             top_hi.p2.x = cx + 18; top_hi.p2.y = cap_y - 14;
@@ -1241,7 +1480,7 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             // Bottom shadow bevel line
             lv_draw_line_dsc_t bot_sh;
             lv_draw_line_dsc_init(&bot_sh);
-            bot_sh.color = lv_color_hex(0x131618);
+            bot_sh.color = lv_color_hex(0x101316);
             bot_sh.width = 1;
             bot_sh.p1.x = cx - 18; bot_sh.p1.y = cap_y + 14;
             bot_sh.p2.x = cx + 18; bot_sh.p2.y = cap_y + 14;
@@ -1250,15 +1489,15 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
             // Recessed center finger grip
             lv_draw_rect_dsc_t grip;
             lv_draw_rect_dsc_init(&grip);
-            grip.bg_color = lv_color_hex(0x181B1E);
+            grip.bg_color = lv_color_hex(0x14171A);
             grip.bg_opa = LV_OPA_COVER;
             lv_area_t ga{cx - 14, cap_y - 6, cx + 14, cap_y + 6};
             lv_draw_rect(layer, &grip, &ga);
 
-            // Center position indicator line (cyan with white center)
+            // Center position indicator line (soft silver with white center)
             lv_draw_rect_dsc_t pos_line;
             lv_draw_rect_dsc_init(&pos_line);
-            pos_line.bg_color = COLOR_CYAN;
+            pos_line.bg_color = COLOR_SILVER;
             pos_line.bg_opa = LV_OPA_COVER;
             lv_area_t la{cx - 15, cap_y - 1, cx + 15, cap_y + 1};
             lv_draw_rect(layer, &pos_line, &la);
@@ -1376,6 +1615,8 @@ StripUI build_strip_ui(lv_obj_t* parent, int index, int x, int y, int width, boo
 
 lv_obj_t* mixer_screen_create(void) {
     g_input_strips.clear();
+    g_empty_container = nullptr;
+    g_add_card = nullptr;
     g_add_label = nullptr;
     g_empty_hint = nullptr;
 
@@ -1386,6 +1627,17 @@ lv_obj_t* mixer_screen_create(void) {
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(screen, COLOR_BG, 0);
     lv_obj_set_style_pad_all(screen, 0, 0);
+
+    lv_obj_add_event_cb(screen, [](lv_event_t*) {
+        g_screen = nullptr;
+        g_scroll_container = nullptr;
+        g_empty_container = nullptr;
+        g_add_card = nullptr;
+        g_add_label = nullptr;
+        g_empty_hint = nullptr;
+        g_input_strips.clear();
+        g_master_strip = {};
+    }, LV_EVENT_DELETE, nullptr);
 
     // Horizontal scroll container for input channels
     auto* scroll = lv_obj_create(screen);
@@ -1404,48 +1656,150 @@ lv_obj_t* mixer_screen_create(void) {
         createChannelStrip(i);
     }
 
-    // Add "+" placeholder card at the end of input strips
+    // 1. Dedicated Empty Console Faceplate Panel
+    const int ec_width = 640;
+    const int ec_height = 420;
+    auto* empty_container = lv_obj_create(scroll);
+    g_empty_container = empty_container;
+    lv_obj_set_size(empty_container, ec_width, ec_height);
+    lv_obj_set_pos(empty_container, (1686 - ec_width) / 2, (STRIP_HEIGHT + 4 - ec_height) / 2);
+    lv_obj_remove_flag(empty_container, LV_OBJ_FLAG_SCROLLABLE);
+    ui::rack_skin::apply_faceplate_panel(empty_container, false);
+    ui::rack_skin::add_faceplate_corner_screws(empty_container, ec_width, ec_height, 6);
+    lv_obj_set_style_pad_all(empty_container, 28, 0);
+
+    // Title: NO CHANNELS CONFIGURED
+    auto* empty_title = lv_label_create(empty_container);
+    lv_label_set_text(empty_title, "NO CHANNELS CONFIGURED");
+    lv_obj_align(empty_title, LV_ALIGN_TOP_MID, 0, 14);
+    lv_obj_set_style_text_font(empty_title, &ac_font_20, 0);
+    lv_obj_set_style_text_color(empty_title, COLOR_TEXT, 0);
+
+    // Subtitle
+    auto* empty_sub = lv_label_create(empty_container);
+    lv_label_set_text(empty_sub, "The mixer starts empty. Add your first input channel to configure physical\nrouting, preamps, and channel DSP processing.");
+    lv_obj_align(empty_sub, LV_ALIGN_TOP_MID, 0, 52);
+    lv_obj_set_style_text_font(empty_sub, &ac_font_12, 0);
+    lv_obj_set_style_text_align(empty_sub, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(empty_sub, COLOR_TEXT2, 0);
+
+    // Primary Action Button: + ADD CHANNEL
+    auto* add_ch_btn = lv_button_create(empty_container);
+    lv_obj_set_size(add_ch_btn, 280, 52);
+    lv_obj_align(add_ch_btn, LV_ALIGN_TOP_MID, 0, 116);
+    ui::rack_skin::apply_hardware_button(add_ch_btn, false, COLOR_SELECTED_BORDER, COLOR_RAISED_PANEL, COLOR_CONTROL);
+    auto* add_ch_lbl = lv_label_create(add_ch_btn);
+    lv_label_set_text(add_ch_lbl, "+ ADD CHANNEL");
+    lv_obj_center(add_ch_lbl);
+    lv_obj_set_style_text_font(add_ch_lbl, &ac_font_16, 0);
+    lv_obj_set_style_text_color(add_ch_lbl, COLOR_SILVER, 0);
+    lv_obj_add_event_cb(add_ch_btn, [](lv_event_t*) {
+        add_channel();
+    }, LV_EVENT_CLICKED, nullptr);
+
+    // Divider line
+    auto* divider = lv_obj_create(empty_container);
+    lv_obj_set_size(divider, 560, 1);
+    lv_obj_align(divider, LV_ALIGN_TOP_MID, 0, 200);
+    lv_obj_set_style_bg_color(divider, COLOR_EDGE, 0);
+    lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(divider, 0, 0);
+
+    // Secondary Extension Points Header
+    auto* ext_hdr = lv_label_create(empty_container);
+    lv_label_set_text(ext_hdr, "CONSOLE ARCHITECTURE EXTENSION POINTS");
+    lv_obj_align(ext_hdr, LV_ALIGN_TOP_MID, 0, 222);
+    lv_obj_set_style_text_font(ext_hdr, &ac_font_12, 0);
+    lv_obj_set_style_text_color(ext_hdr, COLOR_TEXT2, 0);
+
+    // Secondary Buttons row: + ADD AUX, + ADD GROUP BUS, + ADD DCA
+    const int btn_y = 256;
+    auto* add_aux_btn = lv_button_create(empty_container);
+    lv_obj_set_size(add_aux_btn, 170, 42);
+    lv_obj_set_pos(add_aux_btn, 25, btn_y);
+    ui::rack_skin::apply_hardware_button(add_aux_btn, false, COLOR_EDGE, COLOR_CONTROL, lv_color_hex(0x181D23));
+    auto* aux_lbl = lv_label_create(add_aux_btn);
+    lv_label_set_text(aux_lbl, "+ ADD AUX");
+    lv_obj_center(aux_lbl);
+    lv_obj_set_style_text_font(aux_lbl, &ac_font_14, 0);
+    lv_obj_set_style_text_color(aux_lbl, COLOR_TEXT2, 0);
+    lv_obj_add_event_cb(add_aux_btn, [](lv_event_t*) {
+        show_extension_info_modal("AUX BUS ROUTING ARCHITECTURE",
+            "PRISMIX provides 4 stereo Aux Send/Return buses (AUX 01-04).\n\n"
+            "• Sends: Pre-fade or post-fade strip taps routed to aux mix buses.\n"
+            "• Returns: Dedicated return trim, stereo limiter, and FX insert rack.\n"
+            "• Matrix Routing: Assign aux master outputs to physical hardware jacks in the ROUTING tab.");
+    }, LV_EVENT_CLICKED, nullptr);
+
+    auto* add_grp_btn = lv_button_create(empty_container);
+    lv_obj_set_size(add_grp_btn, 180, 42);
+    lv_obj_set_pos(add_grp_btn, 205, btn_y);
+    ui::rack_skin::apply_hardware_button(add_grp_btn, false, COLOR_EDGE, COLOR_CONTROL, lv_color_hex(0x181D23));
+    auto* grp_lbl = lv_label_create(add_grp_btn);
+    lv_label_set_text(grp_lbl, "+ ADD GROUP BUS");
+    lv_obj_center(grp_lbl);
+    lv_obj_set_style_text_font(grp_lbl, &ac_font_14, 0);
+    lv_obj_set_style_text_color(grp_lbl, COLOR_TEXT2, 0);
+    lv_obj_add_event_cb(add_grp_btn, [](lv_event_t*) {
+        show_extension_info_modal("GROUP BUS ARCHITECTURE",
+            "PRISMIX provides 4 stereo Subgroup Summing buses (GROUP 01-04).\n\n"
+            "• Assignment: Channel strips can route directly to Subgroups for stem processing.\n"
+            "• Master Trim & Pan: Group faders control overall stem level into Main L/R.\n"
+            "• Group Routing: Configured via channel strip routing badges and the ROUTING matrix.");
+    }, LV_EVENT_CLICKED, nullptr);
+
+    auto* add_dca_btn = lv_button_create(empty_container);
+    lv_obj_set_size(add_dca_btn, 170, 42);
+    lv_obj_set_pos(add_dca_btn, 395, btn_y);
+    ui::rack_skin::apply_hardware_button(add_dca_btn, false, COLOR_EDGE, COLOR_CONTROL, lv_color_hex(0x181D23));
+    auto* dca_lbl = lv_label_create(add_dca_btn);
+    lv_label_set_text(dca_lbl, "+ ADD DCA");
+    lv_obj_center(dca_lbl);
+    lv_obj_set_style_text_font(dca_lbl, &ac_font_14, 0);
+    lv_obj_set_style_text_color(dca_lbl, COLOR_TEXT2, 0);
+    lv_obj_add_event_cb(add_dca_btn, [](lv_event_t*) {
+        show_extension_info_modal("DCA GROUPS ARCHITECTURE",
+            "PRISMIX provides 8 Digitally Controlled Amplifier groups (DCA 01-08).\n\n"
+            "• Control: DCAs adjust assigned channel fader levels proportionally without audio summing.\n"
+            "• Mute Grouping: DCA mute pushbuttons mute all assigned channel paths simultaneously.\n"
+            "• Architecture: Supported in the MixerState data model as clean architectural extension points.");
+    }, LV_EVENT_CLICKED, nullptr);
+
+    // 2. Trailing Channel Strip Add Card (displayed when channels are populated)
     auto* add_card = lv_obj_create(scroll);
     g_add_card = add_card;
-    reposition_add_card();
     lv_obj_remove_flag(add_card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(add_card, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(add_card, lv_color_hex(0x13171A), 0);
-    lv_obj_set_style_border_color(add_card, COLOR_EDGE, 0);
-    lv_obj_set_style_border_width(add_card, 1, 0);
-    lv_obj_set_style_radius(add_card, 2, 0);
+    ui::rack_skin::apply_channel_strip_panel(add_card, false);
+    ui::rack_skin::create_rack_screw(add_card, 4, 4);
+    ui::rack_skin::create_rack_screw(add_card, 130 - 18, 4);
+    ui::rack_skin::create_rack_screw(add_card, 4, STRIP_HEIGHT - 18);
+    ui::rack_skin::create_rack_screw(add_card, 130 - 18, STRIP_HEIGHT - 18);
 
     auto* plus_lbl = lv_label_create(add_card);
     lv_label_set_text(plus_lbl, "+");
     lv_obj_align(plus_lbl, LV_ALIGN_CENTER, 0, -20);
     lv_obj_set_style_text_font(plus_lbl, &ac_font_28, 0);
-    lv_obj_set_style_text_color(plus_lbl, COLOR_CYAN, 0);
+    lv_obj_set_style_text_color(plus_lbl, COLOR_SILVER, 0);
 
     g_add_label = lv_label_create(add_card);
-    lv_label_set_text(g_add_label, g_mixer_state.channels.empty() ? "ADD INPUT" : "ADD CH");
+    lv_label_set_text(g_add_label, "ADD CH");
     lv_obj_align(g_add_label, LV_ALIGN_CENTER, 0, 20);
     lv_obj_set_style_text_font(g_add_label, &ac_font_12, 0);
     lv_obj_set_style_text_color(g_add_label, COLOR_TEXT2, 0);
-
-    if (g_mixer_state.channels.empty()) {
-        g_empty_hint = lv_label_create(add_card);
-        lv_label_set_text(g_empty_hint, "NO CHANNELS\nADD ONE, THEN\nASSIGN AN INPUT");
-        lv_obj_align(g_empty_hint, LV_ALIGN_CENTER, 0, 78);
-        lv_obj_set_style_text_font(g_empty_hint, &ac_font_12, 0);
-        lv_obj_set_style_text_align(g_empty_hint, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_color(g_empty_hint, COLOR_TEXT2, 0);
-    }
 
     lv_obj_add_event_cb(add_card, [](lv_event_t* e) {
         (void)e;
         add_channel();
     }, LV_EVENT_CLICKED, nullptr);
 
+    reposition_add_card();
+
     // Docked Master strip on the right (permanently fixed, protected)
     g_master_strip = build_strip_ui(screen, -1, 1702, 52, 208, true);
 
-    // Apply initial selection
-    select_channel(g_mixer_state.selected_channel);
+    // Apply initial visual selection
+    sync_selection_visuals();
 
     return screen;
 }
@@ -1472,53 +1826,6 @@ void mixer_screen_dismiss_modal(void) {
         g_active_modal = nullptr;
     }
 }
-
-void mixer_screen_sync_after_recall(void) {
-    const int target_count = static_cast<int>(g_mixer_state.channels.size());
-
-    // 1. Remove excess strips if preset has fewer channels
-    while (static_cast<int>(g_input_strips.size()) > target_count) {
-        removeChannelStrip(static_cast<int>(g_input_strips.size()) - 1);
-    }
-
-    // 2. Update existing strips with restored state
-    for (size_t i = 0; i < g_input_strips.size(); ++i) {
-        updateChannelStrip(static_cast<int>(i));
-        if (g_input_strips[i].fader_obj) {
-            lv_obj_invalidate(g_input_strips[i].fader_obj);
-        }
-    }
-
-    // 3. Create strips for restored channels that are missing on screen
-    for (int i = static_cast<int>(g_input_strips.size()); i < target_count; ++i) {
-        createChannelStrip(i);
-    }
-
-    // 4. Update the add card position and empty hint
-    reposition_add_card();
-    if (g_add_label) {
-        lv_label_set_text(g_add_label, target_count == 0 ? "ADD INPUT" : "ADD CH");
-    }
-    if (g_empty_hint) {
-        if (target_count == 0) {
-            lv_obj_clear_flag(g_empty_hint, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(g_empty_hint, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-
-    // 5. Invalidate master & entire screen
-    if (g_master_strip.fader_obj) {
-        lv_obj_invalidate(g_master_strip.fader_obj);
-    }
-    if (g_screen) {
-        lv_obj_invalidate(g_screen);
-    }
-
-    // 6. Keep selection valid
-    if (g_mixer_state.selected_channel >= target_count) {
-        select_channel(target_count > 0 ? 0 : -1);
-    } else {
-        select_channel(g_mixer_state.selected_channel);
-    }
+void mixer_screen_sync_selection_visuals(void) {
+    sync_selection_visuals();
 }
